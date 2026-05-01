@@ -496,6 +496,11 @@ class handler(BaseHTTPRequestHandler):
                         "escola_etapa": p["escola_etapa"],
                         "municipio": p["municipio"],
                         "sre": p["sre"],
+                        "endereco_anterior": p["endereco_anterior"],
+                        "endereco_novo": p["endereco_novo"],
+                        "mantenedora_anterior": p["mantenedora_anterior"],
+                        "mantenedora_nova": p["mantenedora_nova"],
+                        "texto_completo": p["texto_completo"],
                     }
                     for p in portarias
                 ],
