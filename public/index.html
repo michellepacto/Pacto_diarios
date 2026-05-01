@@ -895,22 +895,34 @@
       <div class="escolas-list" id="escolas-list-identificadas"></div>
       <div id="escolas-verificar-wrapper" style="display: none;">
         <div id="ia-controls" style="margin-bottom: 24px; padding: 20px; background: var(--cream); border: 1px solid var(--rule);">
-          <div style="display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 16px;">
-            <div style="font-family: 'Inter', sans-serif; font-size: 14px; color: var(--ink); flex: 1; min-width: 200px;">
-              <strong style="display: block; margin-bottom: 4px; font-family: 'Fraunces', serif; font-size: 16px;">Análise automática por IA</strong>
-              <span style="color: var(--muted);">Um job automático roda no servidor a cada 5 minutos, analisando 20 portarias por vez. Você pode fechar o browser — a análise continua em segundo plano.</span>
-            </div>
-            <div style="display: flex; gap: 8px; flex-wrap: wrap;">
-              <button class="btn-primary" id="btn-buscar-ia" onclick="buscarNomesComIA()" style="white-space: nowrap;">
-                Rodar agora
-              </button>
-              <button onclick="verificarProgresso()" style="background: none; border: 1px solid var(--rule); padding: 10px 18px; font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 500; cursor: pointer; color: var(--ink); white-space: nowrap;">
-                Atualizar lista
-              </button>
-            </div>
+          <div style="margin-bottom: 16px;">
+            <strong style="display: block; margin-bottom: 4px; font-family: 'Fraunces', serif; font-size: 16px;">Análise por IA</strong>
+            <span style="font-family: 'Inter', sans-serif; font-size: 13px; color: var(--muted);">A análise dispara automaticamente quando você processa um diário novo. Use os botões abaixo se quiser forçar uma atualização. Roda em segundo plano — pode fechar o browser.</span>
           </div>
-          <div id="ia-status-auto" style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); padding: 8px 12px; background: var(--paper); border: 1px solid var(--rule);">
-            ⏱ Job automático ativo · processa 20 portarias a cada 5 min · independente do browser
+          <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;">
+            <button class="btn-primary" id="btn-atualizar-novos" onclick="atualizarNovosCampos()" style="white-space: nowrap;">
+              Atualizar novos campos
+            </button>
+            <button onclick="atualizarTudoIA()" id="btn-atualizar-tudo" style="background: none; border: 1px solid var(--accent); padding: 10px 18px; font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 500; cursor: pointer; color: var(--accent); white-space: nowrap;">
+              Atualizar tudo (refazer)
+            </button>
+            <button onclick="verificarProgresso()" style="background: none; border: 1px solid var(--rule); padding: 10px 18px; font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 500; cursor: pointer; color: var(--ink); white-space: nowrap;">
+              Atualizar lista
+            </button>
+          </div>
+          <!-- Painel de progresso da IA -->
+          <div style="margin-top: 12px; padding: 14px 16px; background: var(--paper); border: 1px solid var(--rule);">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+              <span style="font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 600; color: var(--ink);">Progresso da análise</span>
+              <span id="progresso-pct" style="font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--accent); font-weight: 700;">–%</span>
+            </div>
+            <div style="height: 8px; background: var(--rule); border-radius: 999px; overflow: hidden; margin-bottom: 8px;">
+              <div id="progresso-barra" style="height: 100%; background: var(--accent); width: 0%; transition: width 0.6s ease;"></div>
+            </div>
+            <div style="display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted);">
+              <span id="progresso-texto">Carregando progresso...</span>
+              <span id="progresso-ultima">última análise: –</span>
+            </div>
           </div>
         </div>
         <div id="ia-progresso" style="display: none; margin-bottom: 24px; padding: 16px 20px; background: var(--paper); border: 1px solid var(--accent);">
@@ -953,6 +965,8 @@
     // ============================================================
 
     let sb = null; // será inicializado após buscar config
+    let SUPABASE_URL = '';
+    let SUPABASE_ANON_KEY = '';
     let selectedFiles = [];
     let allPortarias = [];
 
@@ -965,6 +979,8 @@
           throw new Error('Config incompleta: faltam env vars no Vercel');
         }
         const { createClient } = supabase;
+        SUPABASE_URL = cfg.supabase_url;
+        SUPABASE_ANON_KEY = cfg.supabase_anon_key;
         sb = createClient(cfg.supabase_url, cfg.supabase_anon_key);
         return true;
       } catch (err) {
@@ -1301,9 +1317,10 @@
       document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
       document.querySelector(`.tab[data-tab="${nome}"]`).classList.add('active');
       document.getElementById(`view-${nome}`).classList.add('active');
-      // Se for Escolas, garantir que está renderizado
+      // Se for Escolas, garantir que está renderizado e atualizar progresso
       if (nome === 'escolas') {
         renderEscolas();
+        atualizarProgressoIA();
       }
     }
 
@@ -1466,16 +1483,69 @@
     }
 
     async function verificarProgresso() {
-      // Recarrega as portarias do banco pra ver o estado atual
       await carregarHistorico();
+      await atualizarProgressoIA();
       showToast('Lista atualizada do banco', 'success');
+    }
+
+    async function atualizarProgressoIA() {
+      try {
+        // Consulta direto o Supabase via REST para pegar contagem atualizada
+        const url = `${SUPABASE_URL}/rest/v1/portarias_inspecao?select=ato_descricao_ia,analisado_em`;
+        const r = await fetch(url, {
+          headers: {
+            'apikey': SUPABASE_ANON_KEY,
+            'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+            'Range': '0-0',
+            'Prefer': 'count=exact',
+          },
+        });
+
+        // Pegar total pelo header Content-Range
+        const range = r.headers.get('Content-Range') || '';
+        const total = parseInt(range.split('/')[1]) || 0;
+
+        // Segunda query: apenas analisadas
+        const r2 = await fetch(`${SUPABASE_URL}/rest/v1/portarias_inspecao?select=analisado_em&ato_descricao_ia=not.is.null&order=analisado_em.desc&limit=1`, {
+          headers: {
+            'apikey': SUPABASE_ANON_KEY,
+            'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+            'Prefer': 'count=exact',
+          },
+        });
+        const range2 = r2.headers.get('Content-Range') || '';
+        const analisadas = parseInt(range2.split('/')[1]) || 0;
+        const ultima = await r2.json();
+
+        const pct = total > 0 ? Math.round(analisadas * 100 / total) : 0;
+        const pendentes = total - analisadas;
+
+        document.getElementById('progresso-barra').style.width = pct + '%';
+        document.getElementById('progresso-pct').textContent = pct + '%';
+
+        if (pct === 100) {
+          document.getElementById('progresso-texto').textContent = `✓ Todas as ${total} portarias analisadas!`;
+          document.getElementById('progresso-pct').style.color = 'green';
+        } else {
+          document.getElementById('progresso-texto').textContent = `${analisadas} de ${total} analisadas · ${pendentes} pendentes`;
+        }
+
+        if (ultima && ultima[0] && ultima[0].analisado_em) {
+          const dt = new Date(ultima[0].analisado_em);
+          const h = dt.getHours().toString().padStart(2,'0');
+          const m = dt.getMinutes().toString().padStart(2,'0');
+          document.getElementById('progresso-ultima').textContent = `última análise: ${h}:${m}`;
+        }
+      } catch(e) {
+        console.warn('Progresso IA:', e);
+      }
     }
 
     // === BUSCA DE NOMES COM IA ===
     let buscaIAAtiva = false;
 
-    async function buscarNomesComIA() {
-      const btnIniciar = document.getElementById('btn-buscar-ia');
+    async function atualizarNovosCampos() {
+      const btnIniciar = document.getElementById('btn-atualizar-novos');
       const progresso = document.getElementById('ia-progresso');
       const status = document.getElementById('ia-status');
       const contador = document.getElementById('ia-contador');
@@ -1483,7 +1553,7 @@
       const log = document.getElementById('ia-log');
 
       btnIniciar.disabled = true;
-      btnIniciar.textContent = 'Rodando...';
+      btnIniciar.textContent = 'Disparado!';
       progresso.style.display = 'block';
       log.innerHTML = '';
       status.textContent = 'Processando lote no servidor...';
@@ -1508,11 +1578,11 @@
         if (data.mensagem && data.processadas === 0) {
           status.textContent = 'Nenhuma portaria pendente! ✓';
           barra.style.width = '100%';
-          showToast('Todas as portarias já foram analisadas', 'success');
+          showToast('Todas as portarias já estão atualizadas!', 'success');
         } else {
           status.textContent = `${data.processadas} analisadas neste lote`;
-          contador.textContent = data.pendentes_restantes === 0 ? 'concluído' : 'job automático continua...';
-          barra.style.width = data.pendentes_restantes === 0 ? '100%' : '60%';
+          contador.textContent = data.continua_em_background ? 'continua processando em background...' : 'concluído';
+          barra.style.width = data.continua_em_background ? '50%' : '100%';
           ;(data.resultados || []).forEach((r) => {
             if (r.erro) {
               log.innerHTML += `<div style="color:var(--accent);">✗ ${escapeHtml(r.numero||'?')}: ${escapeHtml(r.erro)}</div>`;
@@ -1520,7 +1590,11 @@
               log.innerHTML += `<div style="color:var(--ink);">✓ ${escapeHtml(r.numero||'?')}: ${escapeHtml(r.escola||'(sem escola identificada)')}</div>`;
             }
           });
-          showToast(`${data.processadas} analisadas. Job automático cuida do restante a cada 5 min.`, 'success');
+          if (data.continua_em_background) {
+            showToast(`${data.processadas} analisadas. Continua processando o restante automaticamente.`, 'success');
+          } else {
+            showToast(`${data.processadas} analisadas. Tudo completo!`, 'success');
+          }
         }
 
         // Recarregar do banco com dados atualizados
@@ -1530,7 +1604,43 @@
         showToast('Erro: ' + e.message, 'error');
       } finally {
         btnIniciar.disabled = false;
-        btnIniciar.textContent = 'Rodar agora';
+        btnIniciar.textContent = 'Atualizar novos campos';
+      }
+    }
+
+    async function atualizarTudoIA() {
+      const confirma = confirm(
+        'Isso vai APAGAR todos os campos preenchidos pela IA e analisar TODAS as 884 portarias do zero.\n\n' +
+        'Vai levar aproximadamente 1 hora rodando em segundo plano.\n\n' +
+        'Você pode fechar o browser, a análise continua no servidor.\n\n' +
+        'Tem certeza que deseja continuar?'
+      );
+      if (!confirma) return;
+
+      const btn = document.getElementById('btn-atualizar-tudo');
+      btn.disabled = true;
+      btn.textContent = 'Resetando...';
+
+      try {
+        const r = await fetch(`${SUPABASE_FN}/resetar-analise-ia`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+        const data = await r.json();
+
+        if (!r.ok) {
+          showToast('Erro: ' + (data.erro || 'desconhecido'), 'error');
+        } else {
+          showToast(`Todas as portarias resetadas (${data.total_resetadas}). Análise reiniciada em background.`, 'success');
+          await carregarHistorico();
+          await atualizarProgressoIA();
+        }
+      } catch (e) {
+        showToast('Erro: ' + e.message, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Atualizar tudo (refazer)';
       }
     }
 
@@ -1539,6 +1649,14 @@
     (async () => {
       await initSupabase();
       await carregarHistorico();
+      await atualizarProgressoIA();
+      // Atualiza progresso automaticamente a cada 30s enquanto a aba Escolas estiver aberta
+      setInterval(async () => {
+        const abaEscolas = document.getElementById('view-escolas');
+        if (abaEscolas && abaEscolas.style.display !== 'none') {
+          await atualizarProgressoIA();
+        }
+      }, 30000);
     })();
   </script>
 </body>
