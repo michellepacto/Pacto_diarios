@@ -1155,11 +1155,20 @@
         const sizeMB = (item.file.size / (1024 * 1024)).toFixed(2);
         const sizeStr = `${sizeMB} MB`;
 
+        let statusSucesso = `${item.result?.portarias_inseridas || 0} portarias`;
+        const dup = item.result?.portarias_duplicadas || 0;
+        const jaExistiam = item.result?.ja_existiam_no_banco || 0;
+        if (dup > 0 && (item.result?.portarias_inseridas || 0) === 0) {
+          statusSucesso = `Já processado`;
+        } else if (dup > 0) {
+          statusSucesso = `${item.result.portarias_inseridas} novas, ${dup} já existiam`;
+        }
+
         const statusText = {
           pending: 'Aguardando',
           uploading: 'Enviando',
           processing: 'Processando',
-          success: `${item.result?.portarias_inseridas || 0} portarias`,
+          success: statusSucesso,
           error: 'Erro',
         }[item.status];
 
