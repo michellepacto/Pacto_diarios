@@ -631,7 +631,20 @@ class handler(BaseHTTPRequestHandler):
                     "portarias": [],
                     "mensagem": "Nenhuma portaria de Inspeção Escolar encontrada neste PDF",
                 })
-            
+
+            # Verificar se este diário (data) já foi processado anteriormente
+            ja_processado_qtd = 0
+            if data_diario:
+                try:
+                    existentes = supabase.table("portarias_inspecao") \
+                        .select("id", count="exact") \
+                        .eq("data_diario", data_diario.isoformat()) \
+                        .limit(1) \
+                        .execute()
+                    ja_processado_qtd = existentes.count or 0
+                except Exception:
+                    pass
+
             portarias = [parsear_portaria(p, nome_arquivo, pagina_secao, data_diario) for p in portarias_brutas]
 
             inseridas = 0
@@ -656,6 +669,7 @@ class handler(BaseHTTPRequestHandler):
                 "portarias_extraidas": len(portarias),
                 "portarias_inseridas": inseridas,
                 "portarias_duplicadas": duplicadas,
+                "ja_existiam_no_banco": ja_processado_qtd,
                 "erros": erros,
                 "portarias": [
                     {
