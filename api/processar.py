@@ -24,19 +24,65 @@ SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
 BUCKET_NAME = "diarios"
 
 
-MARCADOR_INICIO = "ASSESSORIA DE INSPEÇÃO ESCOLAR"
+MARCADORES_INICIO = [
+    "ASSESSORIA DE INSPEÇÃO ESCOLAR",
+    "SUPERINTENDÊNCIA DE REGULAÇÃO E INSPEÇÃO ESCOLAR",
+    "SUPERINTENDENCIA DE REGULACAO E INSPECAO ESCOLAR",
+    "ATOS ASSINADOS PELA SUBSECRETÁRIA DE ARTICULAÇÃO EDUCACIONAL",
+    "ATOS ASSINADOS PELA SUBSECRETARIA DE ARTICULACAO EDUCACIONAL",
+]
 
 MARCADORES_FIM = [
-    "Superintendências Regionais",
-    "SUPERINTENDÊNCIAS REGIONAIS",
-    "SRE de ",
+    "Superintendências Regionais de Ensino - SRE",
+    "SUPERINTENDÊNCIAS REGIONAIS DE ENSINO",
+    "SRE de Almenara",
+    "SRE de Araçuaí",
+    "SRE de Barbacena",
+    "SRE de Caratinga",
+    "SRE de Carangola",
+    "SRE de Caxambu",
+    "SRE de Conselheiro Lafaiete",
+    "SRE de Coronel Fabriciano",
+    "SRE de Curvelo",
+    "SRE de Diamantina",
+    "SRE de Divinópolis",
+    "SRE de Governador Valadares",
+    "SRE de Guanhães",
+    "SRE de Itajubá",
+    "SRE de Ituiutaba",
+    "SRE de Januária",
+    "SRE de Juiz de Fora",
+    "SRE de Leopoldina",
+    "SRE de Manhuaçu",
+    "SRE de Metropolitana",
+    "SRE de Monte Carmelo",
+    "SRE de Montes Claros",
+    "SRE de Muriaé",
+    "SRE de Nova Era",
+    "SRE de Ouro Preto",
+    "SRE de Pará de Minas",
+    "SRE de Paracatu",
+    "SRE de Passos",
+    "SRE de Patos de Minas",
+    "SRE de Patrocínio",
+    "SRE de Pirapora",
+    "SRE de Poços de Caldas",
+    "SRE de Ponte Nova",
+    "SRE de Pouso Alegre",
+    "SRE de São João Del Rei",
+    "SRE de São Sebastião do Paraíso",
+    "SRE de Sete Lagoas",
+    "SRE de Teófilo Otoni",
+    "SRE de Ubá",
+    "SRE de Uberaba",
+    "SRE de Uberlândia",
+    "SRE de Unaí",
     "Fundação Helena Antipoff",
     "Universidade do Estado",
     "Universidade Estadual",
     "Fundação Caio Martins",
     "Editais e Avisos",
     "EDITAIS E AVISOS",
-    "Atos assinados pelo Subsecretário",
 ]
 
 
@@ -55,27 +101,30 @@ def extrair_texto_pdf(caminho_pdf: str) -> tuple:
 
 
 def localizar_secao(texto_completo: str, paginas: dict) -> tuple:
+    """Localiza a seção de Inspeção Escolar (legacy fallback).
+    
+    Mantida para compatibilidade, mas a estratégia principal agora é
+    identificar portarias diretamente pelo padrão (ver quebrar_em_portarias).
+    Esta função apenas determina a página onde aparece o cabeçalho, se houver.
+    """
     texto_upper = texto_completo.upper()
-    idx_inicio = texto_upper.find(MARCADOR_INICIO)
-    if idx_inicio == -1:
-        return None, None
-
+    idx_inicio = -1
+    for marcador in MARCADORES_INICIO:
+        idx = texto_upper.find(marcador)
+        if idx != -1 and (idx_inicio == -1 or idx < idx_inicio):
+            idx_inicio = idx
+    
     pagina_inicio = None
-    for num_pag in paginas:
-        marcador_pag = f"[PAGINA_{num_pag}]"
-        if marcador_pag in texto_completo[:idx_inicio]:
-            pagina_inicio = num_pag
-
-    texto_secao = texto_completo[idx_inicio:]
-    fim_mais_proximo = len(texto_secao)
-    for marcador_fim in MARCADORES_FIM:
-        idx_fim = texto_secao.find(marcador_fim, 100)
-        if idx_fim != -1 and idx_fim < fim_mais_proximo:
-            fim_mais_proximo = idx_fim
-
-    texto_secao = texto_secao[:fim_mais_proximo]
-    texto_secao = re.sub(r'\[PAGINA_\d+\]', '', texto_secao)
-    return texto_secao.strip(), pagina_inicio
+    if idx_inicio != -1:
+        for num_pag in paginas:
+            marcador_pag = f"[PAGINA_{num_pag}]"
+            if marcador_pag in texto_completo[:idx_inicio]:
+                pagina_inicio = num_pag
+    
+    # Retorna o texto inteiro (sem marcadores de página) - quebrar_em_portarias
+    # vai fazer o filtro pelo padrão característico das portarias.
+    texto_limpo = re.sub(r'\[PAGINA_\d+\]', '', texto_completo)
+    return texto_limpo.strip(), pagina_inicio
 
 
 def normalizar_texto(texto: str) -> str:
@@ -86,20 +135,63 @@ def normalizar_texto(texto: str) -> str:
 
 
 def quebrar_em_portarias(texto_secao: str) -> list:
-    padrao = r'PORTARIA\s+N[\.\s]*[ºoº°]?\s*(\d+)\s*/\s*(\d{4})'
+    """Identifica portarias da Assessoria/Superintendência de Inspeção Escolar.
+    
+    Estratégia: encontra todas as 'PORTARIA SEE N.º X/AAAA' (ou 'PORTARIA N.º') 
+    no texto e filtra pelas que têm o padrão característico de portarias 
+    de inspeção escolar (PROCESSO N.º + Resolução SEE/artigo 13 + termina com SRE –).
+    
+    Isso é necessário porque o PyMuPDF extrai texto de PDFs em colunas em ordem
+    espacial, então portarias podem aparecer em ordem diferente da visual e
+    podem estar separadas dos cabeçalhos da seção.
+    """
+    padrao = r'PORTARIA(?:\s+SEE)?\s+N[\.\s]*[ºoº°]?\s*(\d+)\s*/\s*(\d{4})'
     matches = list(re.finditer(padrao, texto_secao, re.IGNORECASE))
+    
     portarias = []
+    vistos = set()  # Para deduplicar
+    
     for i, match in enumerate(matches):
         numero = match.group(1)
         ano = match.group(2)
+        chave = f"{numero}/{ano}"
+        
+        if chave in vistos:
+            continue
+        
         inicio = match.start()
         fim = matches[i + 1].start() if i + 1 < len(matches) else len(texto_secao)
+        
+        # Limita o tamanho de uma portaria para 5000 chars (evita capturar lixo)
+        if fim - inicio > 5000:
+            fim = inicio + 5000
+        
+        texto_portaria = texto_secao[inicio:fim].strip()
+        
+        # FILTRO: portarias de inspeção escolar têm:
+        #   1. "PROCESSO N." nos próximos 300 chars
+        #   2. Mencionam "Resolução SEE" ou "artigo 13"
+        #   3. Terminam com "SRE –" ou "SRE -"
+        cabecalho = texto_portaria[:400]
+        tem_processo = bool(re.search(r'PROCESSO\s+N[\.\s]*[ºoº°]?', cabecalho, re.IGNORECASE))
+        tem_resolucao = bool(re.search(r'Resolu[çc][ãa]o\s+SEE|artigo\s+13|art\.?\s*13', cabecalho, re.IGNORECASE))
+        tem_sre = bool(re.search(r'SRE\s*[–\-]\s*\w+', texto_portaria))
+        
+        # Aceita se tiver pelo menos 2 dos 3 sinais
+        sinais = sum([tem_processo, tem_resolucao, tem_sre])
+        if sinais < 2:
+            continue
+        
+        vistos.add(chave)
         portarias.append({
-            "numero_completo": f"{numero}/{ano}",
+            "numero_completo": chave,
             "numero": int(numero),
             "ano": int(ano),
-            "texto": texto_secao[inicio:fim].strip(),
+            "texto": texto_portaria,
         })
+    
+    # Ordenar por número
+    portarias.sort(key=lambda p: (p["ano"], p["numero"]))
     return portarias
 
 
@@ -357,17 +449,20 @@ class handler(BaseHTTPRequestHandler):
             data_diario = extrair_data_diario(nome_arquivo, texto)
             texto_secao, pagina_secao = localizar_secao(texto, paginas)
 
-            if not texto_secao:
+            # texto_secao agora retorna o texto completo do PDF.
+            # A filtragem de portarias é feita por padrão em quebrar_em_portarias.
+            portarias_brutas = quebrar_em_portarias(texto_secao or "")
+            
+            if not portarias_brutas:
                 return self._json_response(200, {
                     "arquivo": nome_arquivo,
                     "secao_encontrada": False,
                     "portarias_extraidas": 0,
                     "portarias_inseridas": 0,
                     "portarias": [],
-                    "mensagem": "Seção 'Assessoria de Inspeção Escolar' não encontrada neste PDF",
+                    "mensagem": "Nenhuma portaria de Inspeção Escolar encontrada neste PDF",
                 })
-
-            portarias_brutas = quebrar_em_portarias(texto_secao)
+            
             portarias = [parsear_portaria(p, nome_arquivo, pagina_secao, data_diario) for p in portarias_brutas]
 
             inseridas = 0
