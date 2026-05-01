@@ -1,0 +1,19 @@
+{
+  "version": 2,
+  "functions": {
+    "api/processar.py": {
+      "runtime": "python3.11",
+      "maxDuration": 60
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/",
+      "destination": "/public/index.html"
+    },
+    {
+      "source": "/index.html",
+      "destination": "/public/index.html"
+    }
+  ]
+}

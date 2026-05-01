@@ -1,0 +1,893 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Extrator de Portarias — Diário Oficial MG</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --ink: #1a1814;
+      --paper: #f4f0e8;
+      --paper-dark: #e8e2d4;
+      --accent: #a02c2c;
+      --accent-soft: #c44545;
+      --gold: #b8924f;
+      --green: #4a6741;
+      --amber: #c98a2e;
+      --rule: #2a2620;
+      --muted: #6b6457;
+      --shadow: 0 4px 12px rgba(26, 24, 20, 0.08);
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--paper);
+      background-image:
+        repeating-linear-gradient(0deg, transparent, transparent 28px, rgba(26, 24, 20, 0.025) 28px, rgba(26, 24, 20, 0.025) 29px),
+        radial-gradient(circle at 20% 10%, rgba(184, 146, 79, 0.06) 0%, transparent 40%),
+        radial-gradient(circle at 80% 60%, rgba(160, 44, 44, 0.04) 0%, transparent 40%);
+      color: var(--ink);
+      min-height: 100vh;
+      padding: 40px 20px;
+    }
+
+    .container {
+      max-width: 1100px;
+      margin: 0 auto;
+    }
+
+    /* CABEÇALHO ESTILO JORNAL */
+    .masthead {
+      border-top: 4px double var(--ink);
+      border-bottom: 4px double var(--ink);
+      padding: 32px 0 24px;
+      margin-bottom: 48px;
+      text-align: center;
+      position: relative;
+    }
+
+    .masthead::before, .masthead::after {
+      content: "";
+      position: absolute;
+      left: 0; right: 0;
+      height: 1px;
+      background: var(--ink);
+    }
+    .masthead::before { top: 7px; }
+    .masthead::after { bottom: 7px; }
+
+    .masthead-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 18px;
+      padding: 0 8px;
+    }
+
+    .masthead h1 {
+      font-family: 'Fraunces', serif;
+      font-weight: 600;
+      font-size: clamp(2.5rem, 6vw, 4.5rem);
+      line-height: 1;
+      letter-spacing: -0.02em;
+      margin-bottom: 8px;
+      font-variation-settings: "opsz" 144;
+    }
+
+    .masthead h1 em {
+      font-style: italic;
+      font-weight: 500;
+      color: var(--accent);
+    }
+
+    .masthead-sub {
+      font-family: 'Fraunces', serif;
+      font-style: italic;
+      font-size: 1.1rem;
+      color: var(--muted);
+      letter-spacing: 0.02em;
+    }
+
+    /* ÁREA DE UPLOAD */
+    .upload-section {
+      margin-bottom: 32px;
+    }
+
+    .section-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .section-label::before {
+      content: "";
+      width: 24px;
+      height: 1px;
+      background: var(--ink);
+    }
+
+    .dropzone {
+      border: 2px dashed var(--rule);
+      background: rgba(255, 255, 255, 0.4);
+      border-radius: 4px;
+      padding: 60px 32px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.25s ease;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .dropzone:hover {
+      border-color: var(--accent);
+      background: rgba(255, 255, 255, 0.7);
+    }
+
+    .dropzone.drag-active {
+      border-color: var(--accent);
+      background: rgba(196, 69, 69, 0.05);
+      transform: scale(1.005);
+    }
+
+    .dropzone-icon {
+      width: 56px;
+      height: 56px;
+      margin: 0 auto 20px;
+      stroke: var(--ink);
+      stroke-width: 1.2;
+      fill: none;
+      transition: transform 0.3s ease, stroke 0.3s ease;
+    }
+
+    .dropzone:hover .dropzone-icon,
+    .dropzone.drag-active .dropzone-icon {
+      transform: translateY(-4px);
+      stroke: var(--accent);
+    }
+
+    .dropzone-title {
+      font-family: 'Fraunces', serif;
+      font-size: 1.6rem;
+      font-weight: 500;
+      margin-bottom: 8px;
+    }
+
+    .dropzone-hint {
+      font-size: 0.9rem;
+      color: var(--muted);
+      margin-bottom: 20px;
+    }
+
+    .dropzone-button {
+      display: inline-block;
+      background: var(--ink);
+      color: var(--paper);
+      padding: 12px 28px;
+      border: none;
+      border-radius: 2px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .dropzone-button:hover {
+      background: var(--accent);
+      transform: translateY(-1px);
+      box-shadow: var(--shadow);
+    }
+
+    #file-input {
+      display: none;
+    }
+
+    /* LISTA DE ARQUIVOS */
+    .file-list {
+      margin-top: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .file-item {
+      background: rgba(255, 255, 255, 0.6);
+      border: 1px solid var(--paper-dark);
+      border-radius: 3px;
+      padding: 16px 20px;
+      display: grid;
+      grid-template-columns: auto 1fr auto auto;
+      align-items: center;
+      gap: 16px;
+      transition: all 0.2s ease;
+    }
+
+    .file-item.processing {
+      border-color: var(--amber);
+      background: rgba(201, 138, 46, 0.05);
+    }
+
+    .file-item.success {
+      border-color: var(--green);
+      background: rgba(74, 103, 65, 0.05);
+    }
+
+    .file-item.error {
+      border-color: var(--accent);
+      background: rgba(160, 44, 44, 0.05);
+    }
+
+    .file-icon {
+      width: 32px;
+      height: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--paper);
+      border: 1px solid var(--rule);
+      border-radius: 2px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+      flex-shrink: 0;
+    }
+
+    .file-item.processing .file-icon {
+      animation: pulse 1.5s ease infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .file-info {
+      min-width: 0;
+    }
+
+    .file-name {
+      font-family: 'Fraunces', serif;
+      font-size: 1rem;
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-bottom: 2px;
+    }
+
+    .file-meta {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: var(--muted);
+      letter-spacing: 0.05em;
+    }
+
+    .file-status {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      padding: 4px 10px;
+      border-radius: 2px;
+    }
+
+    .file-status.pending {
+      color: var(--muted);
+      border: 1px solid var(--paper-dark);
+    }
+
+    .file-status.processing {
+      color: var(--amber);
+      border: 1px solid var(--amber);
+    }
+
+    .file-status.success {
+      color: var(--green);
+      border: 1px solid var(--green);
+    }
+
+    .file-status.error {
+      color: var(--accent);
+      border: 1px solid var(--accent);
+    }
+
+    .file-remove {
+      background: none;
+      border: 1px solid var(--paper-dark);
+      width: 28px;
+      height: 28px;
+      border-radius: 2px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      transition: all 0.2s ease;
+    }
+
+    .file-remove:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .file-remove:disabled {
+      opacity: 0.3;
+      cursor: not-allowed;
+    }
+
+    /* ACTIONS */
+    .actions {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 24px;
+      padding: 20px 0;
+      border-top: 1px solid var(--paper-dark);
+    }
+
+    .actions-summary {
+      font-family: 'Fraunces', serif;
+      font-style: italic;
+      color: var(--muted);
+    }
+
+    .actions-summary strong {
+      color: var(--ink);
+      font-style: normal;
+      font-weight: 600;
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: var(--paper);
+      border: none;
+      padding: 14px 32px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      cursor: pointer;
+      border-radius: 2px;
+      transition: all 0.2s ease;
+    }
+
+    .btn-primary:hover:not(:disabled) {
+      background: var(--accent-soft);
+      transform: translateY(-1px);
+      box-shadow: 0 6px 16px rgba(160, 44, 44, 0.2);
+    }
+
+    .btn-primary:disabled {
+      background: var(--muted);
+      cursor: not-allowed;
+      opacity: 0.5;
+    }
+
+    /* RESULTADOS */
+    .results-section {
+      margin-top: 56px;
+      display: none;
+    }
+
+    .results-section.active {
+      display: block;
+    }
+
+    .results-header {
+      border-top: 2px solid var(--ink);
+      padding-top: 24px;
+      margin-bottom: 24px;
+    }
+
+    .results-title {
+      font-family: 'Fraunces', serif;
+      font-size: 2rem;
+      font-weight: 500;
+      margin-bottom: 4px;
+    }
+
+    .results-subtitle {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 16px;
+      margin-bottom: 32px;
+    }
+
+    .stat-card {
+      background: rgba(255, 255, 255, 0.6);
+      border: 1px solid var(--paper-dark);
+      padding: 20px;
+      border-radius: 3px;
+    }
+
+    .stat-card.accent {
+      border-color: var(--accent);
+      background: rgba(160, 44, 44, 0.03);
+    }
+
+    .stat-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+
+    .stat-value {
+      font-family: 'Fraunces', serif;
+      font-size: 2.4rem;
+      font-weight: 600;
+      line-height: 1;
+      color: var(--ink);
+      font-variation-settings: "opsz" 144;
+    }
+
+    .stat-value.accent {
+      color: var(--accent);
+    }
+
+    /* PORTARIAS */
+    .portarias-list {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .portaria-card {
+      background: rgba(255, 255, 255, 0.5);
+      border: 1px solid var(--paper-dark);
+      border-left: 3px solid var(--ink);
+      padding: 20px 24px;
+      border-radius: 2px;
+    }
+
+    .portaria-card[data-tipo="cessacao"] { border-left-color: var(--accent); }
+    .portaria-card[data-tipo="autorizacao"] { border-left-color: var(--green); }
+    .portaria-card[data-tipo="mudanca_logradouro"],
+    .portaria-card[data-tipo="mudanca_predio"] { border-left-color: var(--gold); }
+    .portaria-card[data-tipo="mudanca_mantenedora"] { border-left-color: var(--amber); }
+
+    .portaria-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .portaria-numero {
+      font-family: 'Fraunces', serif;
+      font-size: 1.3rem;
+      font-weight: 600;
+    }
+
+    .portaria-tipo {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      padding: 4px 8px;
+      background: var(--paper-dark);
+      border-radius: 2px;
+      color: var(--ink);
+    }
+
+    .portaria-escola {
+      font-family: 'Fraunces', serif;
+      font-size: 1.05rem;
+      font-style: italic;
+      margin-bottom: 12px;
+    }
+
+    .portaria-meta {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 8px;
+      font-size: 0.85rem;
+    }
+
+    .meta-item {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+
+    .meta-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .meta-value {
+      font-weight: 500;
+    }
+
+    /* TOAST */
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: var(--ink);
+      color: var(--paper);
+      padding: 14px 24px;
+      border-radius: 3px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      letter-spacing: 0.1em;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.2);
+      transform: translateY(150%);
+      transition: transform 0.3s ease;
+      z-index: 100;
+    }
+
+    .toast.show {
+      transform: translateY(0);
+    }
+
+    .toast.error { background: var(--accent); }
+    .toast.success { background: var(--green); }
+
+    /* FOOTER */
+    .footer {
+      margin-top: 80px;
+      padding-top: 24px;
+      border-top: 1px solid var(--paper-dark);
+      text-align: center;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    /* MOBILE */
+    @media (max-width: 640px) {
+      body { padding: 20px 12px; }
+      .file-item {
+        grid-template-columns: auto 1fr;
+        grid-template-rows: auto auto;
+      }
+      .file-status, .file-remove { grid-column: 2; justify-self: end; }
+      .actions { flex-direction: column; gap: 16px; align-items: stretch; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+
+    <header class="masthead">
+      <div class="masthead-meta">
+        <span id="data-hoje">—</span>
+        <span>EDIÇÃO DIGITAL · MINAS GERAIS</span>
+        <span>EXTRAÇÃO AUTOMÁTICA</span>
+      </div>
+      <h1>Extrator de <em>Portarias</em></h1>
+      <p class="masthead-sub">Assessoria de Inspeção Escolar — Diário Oficial</p>
+    </header>
+
+    <section class="upload-section">
+      <p class="section-label">Inserir Documentos</p>
+
+      <div class="dropzone" id="dropzone">
+        <svg class="dropzone-icon" viewBox="0 0 64 64">
+          <path d="M16 40v8a4 4 0 0 0 4 4h24a4 4 0 0 0 4-4v-8" />
+          <path d="M32 12v28" />
+          <path d="M22 22l10-10 10 10" />
+        </svg>
+        <p class="dropzone-title">Arraste os PDFs do diário aqui</p>
+        <p class="dropzone-hint">ou clique no botão para selecionar arquivos</p>
+        <button class="dropzone-button" type="button" id="select-btn">
+          Selecionar PDFs
+        </button>
+        <input type="file" id="file-input" accept="application/pdf,.pdf" multiple />
+      </div>
+
+      <div class="file-list" id="file-list"></div>
+
+      <div class="actions" id="actions" style="display: none;">
+        <p class="actions-summary" id="summary">
+          <strong>0</strong> arquivos selecionados
+        </p>
+        <button class="btn-primary" id="process-btn" disabled>
+          Processar Diários
+        </button>
+      </div>
+    </section>
+
+    <section class="results-section" id="results">
+      <div class="results-header">
+        <h2 class="results-title">Portarias Extraídas</h2>
+        <p class="results-subtitle">Inseridas no Banco de Dados</p>
+      </div>
+
+      <div class="stats-grid" id="stats-grid"></div>
+
+      <div class="portarias-list" id="portarias-list"></div>
+    </section>
+
+    <footer class="footer">
+      Pacto Educacional · Sistema de Extração de Portarias · 2026
+    </footer>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script>
+    const API_ENDPOINT = '/api/processar';
+    const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
+
+    let selectedFiles = [];
+    let allPortarias = [];
+
+    // ----- Data atual no cabeçalho -----
+    const meses = ['JAN', 'FEV', 'MAR', 'ABR', 'MAI', 'JUN', 'JUL', 'AGO', 'SET', 'OUT', 'NOV', 'DEZ'];
+    const hoje = new Date();
+    document.getElementById('data-hoje').textContent =
+      `${String(hoje.getDate()).padStart(2, '0')} ${meses[hoje.getMonth()]} ${hoje.getFullYear()}`;
+
+    // ----- Drag & Drop -----
+    const dropzone = document.getElementById('dropzone');
+    const fileInput = document.getElementById('file-input');
+    const selectBtn = document.getElementById('select-btn');
+
+    selectBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      fileInput.click();
+    });
+
+    dropzone.addEventListener('click', () => fileInput.click());
+
+    fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
+
+    ['dragenter', 'dragover'].forEach(ev =>
+      dropzone.addEventListener(ev, (e) => {
+        e.preventDefault();
+        dropzone.classList.add('drag-active');
+      })
+    );
+
+    ['dragleave', 'drop'].forEach(ev =>
+      dropzone.addEventListener(ev, (e) => {
+        e.preventDefault();
+        if (ev === 'drop' || !dropzone.contains(e.relatedTarget)) {
+          dropzone.classList.remove('drag-active');
+        }
+      })
+    );
+
+    dropzone.addEventListener('drop', (e) => {
+      handleFiles(e.dataTransfer.files);
+    });
+
+    // ----- Gestão de arquivos -----
+    function handleFiles(files) {
+      const novos = Array.from(files).filter(f => {
+        if (f.type !== 'application/pdf' && !f.name.toLowerCase().endsWith('.pdf')) {
+          showToast(`${f.name} não é PDF — ignorado`, 'error');
+          return false;
+        }
+        if (f.size > MAX_FILE_SIZE) {
+          showToast(`${f.name} é muito grande (>50MB) — ignorado`, 'error');
+          return false;
+        }
+        if (selectedFiles.find(s => s.file.name === f.name && s.file.size === f.size)) {
+          return false; // já tem
+        }
+        return true;
+      });
+
+      novos.forEach(file => {
+        selectedFiles.push({
+          id: crypto.randomUUID(),
+          file,
+          status: 'pending',
+          result: null,
+        });
+      });
+
+      renderFileList();
+    }
+
+    function renderFileList() {
+      const list = document.getElementById('file-list');
+      const actions = document.getElementById('actions');
+      const summary = document.getElementById('summary');
+      const processBtn = document.getElementById('process-btn');
+
+      list.innerHTML = '';
+
+      if (selectedFiles.length === 0) {
+        actions.style.display = 'none';
+        return;
+      }
+
+      actions.style.display = 'flex';
+      summary.innerHTML = `<strong>${selectedFiles.length}</strong> arquivo${selectedFiles.length > 1 ? 's' : ''} selecionado${selectedFiles.length > 1 ? 's' : ''}`;
+
+      const pendentes = selectedFiles.filter(s => s.status === 'pending').length;
+      processBtn.disabled = pendentes === 0;
+      processBtn.textContent = pendentes > 0
+        ? `Processar ${pendentes} ${pendentes === 1 ? 'Diário' : 'Diários'}`
+        : 'Processado';
+
+      selectedFiles.forEach(item => {
+        const div = document.createElement('div');
+        div.className = `file-item ${item.status}`;
+        div.dataset.id = item.id;
+
+        const sizeKB = (item.file.size / 1024).toFixed(0);
+        const sizeMB = (item.file.size / (1024 * 1024)).toFixed(2);
+        const sizeStr = item.file.size > 1024 * 1024 ? `${sizeMB} MB` : `${sizeKB} KB`;
+
+        const statusText = {
+          pending: 'Aguardando',
+          processing: 'Processando',
+          success: `${item.result?.portarias_inseridas || 0} portarias`,
+          error: 'Erro',
+        }[item.status];
+
+        div.innerHTML = `
+          <div class="file-icon">PDF</div>
+          <div class="file-info">
+            <p class="file-name">${item.file.name}</p>
+            <p class="file-meta">${sizeStr}</p>
+          </div>
+          <span class="file-status ${item.status}">${statusText}</span>
+          <button class="file-remove" data-remove="${item.id}" ${item.status === 'processing' ? 'disabled' : ''}>×</button>
+        `;
+        list.appendChild(div);
+      });
+
+      // bind remove buttons
+      list.querySelectorAll('[data-remove]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const id = btn.dataset.remove;
+          selectedFiles = selectedFiles.filter(s => s.id !== id);
+          renderFileList();
+        });
+      });
+    }
+
+    // ----- Processamento -----
+    document.getElementById('process-btn').addEventListener('click', async () => {
+      const pendentes = selectedFiles.filter(s => s.status === 'pending');
+      if (pendentes.length === 0) return;
+
+      document.getElementById('process-btn').disabled = true;
+
+      for (const item of pendentes) {
+        item.status = 'processing';
+        renderFileList();
+
+        try {
+          const formData = new FormData();
+          formData.append('pdf', item.file);
+
+          const response = await fetch(API_ENDPOINT, {
+            method: 'POST',
+            body: formData,
+          });
+
+          const data = await response.json();
+
+          if (!response.ok) {
+            throw new Error(data.error || 'Erro no servidor');
+          }
+
+          item.status = 'success';
+          item.result = data;
+
+          if (data.portarias && data.portarias.length > 0) {
+            allPortarias.push(...data.portarias.map(p => ({
+              ...p,
+              arquivo: item.file.name,
+            })));
+          }
+        } catch (err) {
+          item.status = 'error';
+          item.result = { error: err.message };
+          showToast(`Erro: ${err.message}`, 'error');
+        }
+
+        renderFileList();
+      }
+
+      renderResults();
+      showToast('Processamento concluído', 'success');
+    });
+
+    // ----- Resultados -----
+    function renderResults() {
+      if (allPortarias.length === 0) return;
+
+      const section = document.getElementById('results');
+      section.classList.add('active');
+
+      // Estatísticas
+      const stats = {};
+      allPortarias.forEach(p => {
+        stats[p.tipo_acao] = (stats[p.tipo_acao] || 0) + 1;
+      });
+
+      const tipoLabels = {
+        mudanca_logradouro: 'Mudança Logradouro',
+        cessacao: 'Cessação',
+        autorizacao: 'Autorização',
+        mudanca_mantenedora: 'Mudança Mantenedora',
+        mudanca_predio: 'Mudança Prédio',
+        outros: 'Outros',
+      };
+
+      const statsGrid = document.getElementById('stats-grid');
+      statsGrid.innerHTML = `
+        <div class="stat-card accent">
+          <p class="stat-label">Total</p>
+          <p class="stat-value accent">${allPortarias.length}</p>
+        </div>
+        ${Object.entries(stats).map(([tipo, count]) => `
+          <div class="stat-card">
+            <p class="stat-label">${tipoLabels[tipo] || tipo}</p>
+            <p class="stat-value">${count}</p>
+          </div>
+        `).join('')}
+      `;
+
+      // Lista de portarias
+      const list = document.getElementById('portarias-list');
+      list.innerHTML = allPortarias.map(p => `
+        <article class="portaria-card" data-tipo="${p.tipo_acao}">
+          <div class="portaria-header">
+            <span class="portaria-numero">Portaria ${p.numero_completo}</span>
+            <span class="portaria-tipo">${tipoLabels[p.tipo_acao] || p.tipo_acao}</span>
+          </div>
+          ${p.escola_nome ? `<p class="portaria-escola">${p.escola_nome}</p>` : ''}
+          <div class="portaria-meta">
+            ${p.municipio ? `<div class="meta-item"><span class="meta-label">Município</span><span class="meta-value">${p.municipio}</span></div>` : ''}
+            ${p.sre ? `<div class="meta-item"><span class="meta-label">SRE</span><span class="meta-value">${p.sre}</span></div>` : ''}
+            ${p.escola_etapa ? `<div class="meta-item"><span class="meta-label">Etapa</span><span class="meta-value">${p.escola_etapa}</span></div>` : ''}
+            ${p.arquivo ? `<div class="meta-item"><span class="meta-label">Arquivo</span><span class="meta-value">${p.arquivo}</span></div>` : ''}
+          </div>
+        </article>
+      `).join('');
+    }
+
+    // ----- Toast -----
+    function showToast(msg, type = 'success') {
+      const toast = document.getElementById('toast');
+      toast.textContent = msg;
+      toast.className = `toast show ${type}`;
+      setTimeout(() => toast.classList.remove('show'), 3500);
+    }
+  </script>
+</body>
+</html>
