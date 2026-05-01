@@ -211,6 +211,34 @@ def quebrar_em_portarias(texto_secao: str) -> list:
         
         texto_portaria = texto_secao[inicio:fim].strip()
         
+        # CORTE NO FIM DO ATO: identifica o primeiro de vários terminadores
+        # possíveis e corta o texto ali. Necessário para evitar capturar lixo
+        # de outras seções, especialmente para a ÚLTIMA portaria do bloco.
+        #
+        # Terminadores (em ordem de prioridade — pega o que aparecer primeiro):
+        #   1. "SRE – Nome" (com travessão) — fim canônico de cada ato
+        #   2. "Atos assinados pel[oa] Sub/Secretári[oa]" — fim da seção inteira
+        #   3. "Superintendências Regionais" — começo da próxima seção (SREs)
+        terminadores = [
+            r'SRE\s*[–\-]\s*[A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ\s]*?(?:\n|$)',
+            r'\n\s*Atos\s+assinados\s+pel[oa]\s+(?:Sub)?[Ss]ecret[áa]ri[oa]',
+            r'\n\s*Superintend[êe]ncias?\s+Regionais',
+        ]
+        melhor_corte = None
+        for padrao in terminadores:
+            m = re.search(padrao, texto_portaria)
+            if m:
+                # Para o terminador 1 (SRE – Nome), incluir o nome no corte;
+                # para os outros (que iniciam outra seção), cortar ANTES
+                if padrao == terminadores[0]:
+                    pos_corte = m.end()
+                else:
+                    pos_corte = m.start()
+                if melhor_corte is None or pos_corte < melhor_corte:
+                    melhor_corte = pos_corte
+        if melhor_corte is not None:
+            texto_portaria = texto_portaria[:melhor_corte].rstrip()
+        
         # FILTRO: portarias/atos de inspeção escolar têm:
         #   1. Mencionam "Resolução SEE" ou "artigo 12/13"
         #   2. Terminam com "SRE –" (com travessão)
