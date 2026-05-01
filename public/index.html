@@ -938,6 +938,8 @@
     const BUCKET = 'diarios';
     const API_ENDPOINT = '/api/processar';
     const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
+    // Edge functions do Supabase (deployadas diretamente, sem passar pelo Vercel)
+    const SUPABASE_FN = 'https://vczwlfcfrlvyzabwievl.supabase.co/functions/v1';
     // ============================================================
 
     let sb = null; // será inicializado após buscar config
@@ -963,7 +965,8 @@
 
     async function carregarHistorico() {
       try {
-        const res = await fetch('/api/listar');
+        // Usa a edge function do Supabase que retorna id + campos IA
+        const res = await fetch(`${SUPABASE_FN}/listar-portarias`);
         if (!res.ok) {
           throw new Error(`HTTP ${res.status}`);
         }
@@ -1217,12 +1220,12 @@
             <span class="portaria-numero">Portaria ${p.numero_completo}</span>
             <span class="portaria-tipo">${tipoLabels[p.tipo_acao] || p.tipo_acao}</span>
           </div>
-          ${p.escola_nome ? `<p class="portaria-escola">${p.escola_nome}</p>` : ''}
+          ${(p.escola_nome || p.escola_nome_ia) ? `<p class="portaria-escola">${escapeHtml(p.escola_nome || p.escola_nome_ia)}${p.escola_nome_ia && !p.escola_nome ? ' <span style="font-size:11px;color:var(--gold);font-style:italic;">(IA)</span>' : ''}</p>` : ''}
           <div class="portaria-meta">
             ${p.data_diario ? `<div class="meta-item"><span class="meta-label">Data do Diário</span><span class="meta-value">${formatarData(p.data_diario)}</span></div>` : ''}
             ${p.municipio ? `<div class="meta-item"><span class="meta-label">Município</span><span class="meta-value">${p.municipio}</span></div>` : ''}
             ${p.sre ? `<div class="meta-item"><span class="meta-label">SRE</span><span class="meta-value">${p.sre}</span></div>` : ''}
-            ${p.escola_etapa ? `<div class="meta-item"><span class="meta-label">Etapa</span><span class="meta-value">${p.escola_etapa}</span></div>` : ''}
+            ${(p.escola_etapa || p.etapa_ensino_ia) ? `<div class="meta-item"><span class="meta-label">Etapa</span><span class="meta-value">${escapeHtml(p.escola_etapa || p.etapa_ensino_ia)}</span></div>` : ''}
             ${p.arquivo ? `<div class="meta-item"><span class="meta-label">Arquivo</span><span class="meta-value">${p.arquivo}</span></div>` : ''}
           </div>
           ${p.texto_completo ? `
@@ -1296,12 +1299,13 @@
 
     // === RENDERIZAÇÃO DE ESCOLAS ===
     function renderEscolas() {
-      // Agrupar portarias por escola_nome (normalizado: trim + lowercase)
+      // Agrupar portarias por nome de escola (regex OU IA, normalizado: trim + lowercase)
       const grupos = {};      // chave: nome normalizado → {nome_display, portarias[], sre, municipio}
-      const verificar = [];   // portarias sem escola_nome
+      const verificar = [];   // portarias sem nome em ambos os campos
 
       for (const p of allPortarias) {
-        const nome = (p.escola_nome || '').trim();
+        // Preferir nome da IA se houver, senão usa o regex
+        const nome = (p.escola_nome || p.escola_nome_ia || '').trim();
         if (!nome) {
           verificar.push(p);
           continue;
@@ -1319,7 +1323,9 @@
         grupos[chave].portarias.push(p);
         if (p.sre) grupos[chave].sres.add(p.sre);
         if (p.municipio) grupos[chave].municipios.add(p.municipio);
-        if (p.escola_etapa) grupos[chave].etapas.add(p.escola_etapa);
+        // Etapa: regex OU IA
+        const etapa = p.escola_etapa || p.etapa_ensino_ia;
+        if (etapa) grupos[chave].etapas.add(etapa);
       }
 
       // Ordenar escolas por nome
@@ -1458,8 +1464,8 @@
       status.textContent = 'Carregando lista de portarias...';
 
       try {
-        // 1. Buscar IDs das portarias sem nome
-        const respLista = await fetch('/api/listar_sem_nome');
+        // 1. Buscar IDs das portarias sem nome via edge function
+        const respLista = await fetch(`${SUPABASE_FN}/listar-sem-nome`);
         if (!respLista.ok) throw new Error('Falha ao listar portarias');
         const dadosLista = await respLista.json();
         const portarias = dadosLista.portarias || [];
@@ -1489,7 +1495,7 @@
           barra.style.width = `${(processadas / total) * 100}%`;
 
           try {
-            const resp = await fetch('/api/analisar', {
+            const resp = await fetch(`${SUPABASE_FN}/analisar`, {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
               body: JSON.stringify({ id: p.id }),
@@ -1504,13 +1510,10 @@
               const local = allPortarias.find(x => x.id === p.id);
               if (local) {
                 local.escola_nome_ia = data.escola_nome_ia;
+                local.etapa_ensino_ia = data.etapa_ensino_ia;
                 local.resumo_ia = data.resumo_ia;
                 local.prazo_ia = data.prazo_ia;
                 local.observacoes_ia = data.observacoes_ia;
-                // Se IA encontrou nome, mover para "identificadas"
-                if (data.escola_nome_ia) {
-                  local.escola_nome = data.escola_nome_ia;
-                }
               }
             } else {
               erros++;
