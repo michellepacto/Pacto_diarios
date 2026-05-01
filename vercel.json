@@ -1,19 +1,23 @@
 {
   "version": 2,
-  "functions": {
-    "api/processar.py": {
-      "runtime": "python3.11",
-      "maxDuration": 60
-    }
-  },
-  "rewrites": [
+  "builds": [
     {
-      "source": "/",
-      "destination": "/public/index.html"
+      "src": "api/processar.py",
+      "use": "@vercel/python"
     },
     {
-      "source": "/index.html",
-      "destination": "/public/index.html"
+      "src": "public/index.html",
+      "use": "@vercel/static"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/api/processar",
+      "dest": "api/processar.py"
+    },
+    {
+      "src": "/",
+      "dest": "public/index.html"
     }
   ]
 }
