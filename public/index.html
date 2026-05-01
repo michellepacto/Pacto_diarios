@@ -1493,36 +1493,18 @@
 
     async function atualizarProgressoIA() {
       try {
-        const headers = {
-          'apikey': SUPABASE_ANON_KEY,
-          'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
-          'Prefer': 'count=exact',
-        };
-
-        // Helper: faz HEAD-style query so para pegar contagem
-        async function contar(filtros) {
-          const url = `${SUPABASE_URL}/rest/v1/portarias_inspecao?select=id&${filtros}&limit=1`;
-          const r = await fetch(url, { headers });
-          const range = r.headers.get('Content-Range') || '';
-          return parseInt(range.split('/')[1]) || 0;
+        // Usa edge function (que tem service role) para contornar RLS
+        const r = await fetch(`${SUPABASE_FN}/progresso-ia`);
+        if (!r.ok) {
+          console.warn('progresso-ia falhou:', r.status);
+          return;
         }
-
-        // Total geral (sem filtro)
-        const r0 = await fetch(`${SUPABASE_URL}/rest/v1/portarias_inspecao?select=id&limit=1`, { headers });
-        const total = parseInt((r0.headers.get('Content-Range') || '').split('/')[1]) || 0;
-
-        // Pendentes: analisado_em IS NULL
-        const pendentes = await contar('analisado_em=is.null');
-
-        // Novos campos: analisado_em NOT NULL AND ato_descricao_ia IS NULL
-        const novosCampos = await contar('analisado_em=not.is.null&ato_descricao_ia=is.null');
-
-        // Completas: ato_descricao_ia IS NOT NULL
-        const completas = total - pendentes - novosCampos;
-
-        // Última análise
-        const ultR = await fetch(`${SUPABASE_URL}/rest/v1/portarias_inspecao?select=analisado_em&analisado_em=not.is.null&order=analisado_em.desc&limit=1`, { headers });
-        const ultima = await ultR.json();
+        const dados = await r.json();
+        const total = dados.total || 0;
+        const pendentes = dados.pendentes || 0;
+        const novosCampos = dados.novos_campos || 0;
+        const completas = dados.completas || 0;
+        const ultima = dados.ultima_analise ? [{ analisado_em: dados.ultima_analise }] : [];
 
         // Atualiza barra de progresso (% analisadas com esquema completo)
         const pct = total > 0 ? Math.round(completas * 100 / total) : 0;
