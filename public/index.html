@@ -1232,12 +1232,21 @@
           </div>
           ${(p.escola_nome || p.escola_nome_ia) ? `<p class="portaria-escola">${escapeHtml(p.escola_nome || p.escola_nome_ia)}${p.escola_nome_ia && !p.escola_nome ? ' <span style="font-size:11px;color:var(--gold);font-style:italic;">(IA)</span>' : ''}</p>` : ''}
           <div class="portaria-meta">
+            ${p.ato_descricao_ia ? `<div class="meta-item"><span class="meta-label">Ato</span><span class="meta-value">${escapeHtml(p.ato_descricao_ia)}</span></div>` : ''}
             ${p.data_diario ? `<div class="meta-item"><span class="meta-label">Data do Diário</span><span class="meta-value">${formatarData(p.data_diario)}</span></div>` : ''}
+            ${p.data_inicio_vigencia_ia ? `<div class="meta-item"><span class="meta-label">Início da Vigência</span><span class="meta-value">${formatarData(p.data_inicio_vigencia_ia)}</span></div>` : ''}
+            ${p.data_vencimento_ia ? `<div class="meta-item"><span class="meta-label">Vencimento</span><span class="meta-value">${formatarData(p.data_vencimento_ia)}</span></div>` : ''}
+            ${p.prazo_ia ? `<div class="meta-item"><span class="meta-label">Prazo</span><span class="meta-value">${escapeHtml(p.prazo_ia)}</span></div>` : ''}
             ${p.municipio ? `<div class="meta-item"><span class="meta-label">Município</span><span class="meta-value">${p.municipio}</span></div>` : ''}
             ${p.sre ? `<div class="meta-item"><span class="meta-label">SRE</span><span class="meta-value">${p.sre}</span></div>` : ''}
             ${(p.escola_etapa || p.etapa_ensino_ia) ? `<div class="meta-item"><span class="meta-label">Etapa</span><span class="meta-value">${escapeHtml(p.escola_etapa || p.etapa_ensino_ia)}</span></div>` : ''}
+            ${p.curso_ia ? `<div class="meta-item"><span class="meta-label">Curso</span><span class="meta-value">${escapeHtml(p.curso_ia)}</span></div>` : ''}
+            ${p.qualificacoes_ia ? `<div class="meta-item"><span class="meta-label">Qualificações</span><span class="meta-value">${escapeHtml(p.qualificacoes_ia)}</span></div>` : ''}
+            ${p.parecer_cee_ia ? `<div class="meta-item"><span class="meta-label">Parecer CEE</span><span class="meta-value">${escapeHtml(p.parecer_cee_ia)}</span></div>` : ''}
             ${p.arquivo ? `<div class="meta-item"><span class="meta-label">Arquivo</span><span class="meta-value">${p.arquivo}</span></div>` : ''}
           </div>
+          ${p.resumo_ia ? `<p style="margin-top: 12px; font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink); padding: 10px 14px; background: var(--cream); border-left: 2px solid var(--gold); font-style: italic;">${escapeHtml(p.resumo_ia)}</p>` : ''}
+          ${p.observacoes_ia ? `<p style="margin-top: 8px; font-family: 'Inter', sans-serif; font-size: 12px; color: var(--muted);"><strong style="color:var(--ink);">Observações:</strong> ${escapeHtml(p.observacoes_ia)}</p>` : ''}
           ${p.texto_completo ? `
             <button class="portaria-toggle" onclick="togglePortaria(${idx})">
               <span class="caret">▶</span>
