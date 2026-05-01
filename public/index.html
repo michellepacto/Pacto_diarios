@@ -1,655 +1,996 @@
-"""
-Vercel Serverless Function - Processa PDF do Supabase Storage
-e insere portarias da Assessoria de Inspeção Escolar no banco.
-
-Endpoint: POST /api/processar
-Recebe:   JSON com {"storage_path": "diarios/arquivo.pdf"}
-Retorna:  JSON com lista de portarias extraídas/inseridas
-"""
-
-import os
-import re
-import json
-import tempfile
-from datetime import date
-from typing import Optional
-from http.server import BaseHTTPRequestHandler
-
-import fitz  # PyMuPDF
-from supabase import create_client
-
-
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
-BUCKET_NAME = "diarios"
-
-
-MARCADORES_INICIO = [
-    "ASSESSORIA DE INSPEÇÃO ESCOLAR",
-    "SUPERINTENDÊNCIA DE REGULAÇÃO E INSPEÇÃO ESCOLAR",
-    "SUPERINTENDENCIA DE REGULACAO E INSPECAO ESCOLAR",
-    "ATOS ASSINADOS PELA SUBSECRETÁRIA DE ARTICULAÇÃO EDUCACIONAL",
-    "ATOS ASSINADOS PELA SUBSECRETARIA DE ARTICULACAO EDUCACIONAL",
-]
-
-MARCADORES_FIM = [
-    "Superintendências Regionais de Ensino - SRE",
-    "SUPERINTENDÊNCIAS REGIONAIS DE ENSINO",
-    "SRE de Almenara",
-    "SRE de Araçuaí",
-    "SRE de Barbacena",
-    "SRE de Caratinga",
-    "SRE de Carangola",
-    "SRE de Caxambu",
-    "SRE de Conselheiro Lafaiete",
-    "SRE de Coronel Fabriciano",
-    "SRE de Curvelo",
-    "SRE de Diamantina",
-    "SRE de Divinópolis",
-    "SRE de Governador Valadares",
-    "SRE de Guanhães",
-    "SRE de Itajubá",
-    "SRE de Ituiutaba",
-    "SRE de Januária",
-    "SRE de Juiz de Fora",
-    "SRE de Leopoldina",
-    "SRE de Manhuaçu",
-    "SRE de Metropolitana",
-    "SRE de Monte Carmelo",
-    "SRE de Montes Claros",
-    "SRE de Muriaé",
-    "SRE de Nova Era",
-    "SRE de Ouro Preto",
-    "SRE de Pará de Minas",
-    "SRE de Paracatu",
-    "SRE de Passos",
-    "SRE de Patos de Minas",
-    "SRE de Patrocínio",
-    "SRE de Pirapora",
-    "SRE de Poços de Caldas",
-    "SRE de Ponte Nova",
-    "SRE de Pouso Alegre",
-    "SRE de São João Del Rei",
-    "SRE de São Sebastião do Paraíso",
-    "SRE de Sete Lagoas",
-    "SRE de Teófilo Otoni",
-    "SRE de Ubá",
-    "SRE de Uberaba",
-    "SRE de Uberlândia",
-    "SRE de Unaí",
-    "Fundação Helena Antipoff",
-    "Universidade do Estado",
-    "Universidade Estadual",
-    "Fundação Caio Martins",
-    "Editais e Avisos",
-    "EDITAIS E AVISOS",
-]
-
-
-def extrair_texto_pdf(caminho_pdf: str) -> tuple:
-    texto_completo = ""
-    paginas = {}
-    metadata_title = ""
-    doc = fitz.open(caminho_pdf)
-    try:
-        # Captura o título do metadata — esses Diários vêm com nome
-        # padronizado "Diário_do_Executivo_AAAA-MM-DD.pdf" embutido,
-        # mesmo se a usuária renomear o arquivo depois.
-        metadata_title = (doc.metadata or {}).get("title", "") or ""
-        for i, pagina in enumerate(doc, start=1):
-            txt = pagina.get_text() or ""
-            paginas[i] = txt
-            texto_completo += f"\n[PAGINA_{i}]\n" + txt
-    finally:
-        doc.close()
-    return texto_completo, paginas, metadata_title
-
-
-def localizar_secao(texto_completo: str, paginas: dict) -> tuple:
-    """Localiza a seção de Inspeção Escolar (legacy fallback).
-    
-    Mantida para compatibilidade, mas a estratégia principal agora é
-    identificar portarias diretamente pelo padrão (ver quebrar_em_portarias).
-    Esta função apenas determina a página onde aparece o cabeçalho, se houver.
-    """
-    texto_upper = texto_completo.upper()
-    idx_inicio = -1
-    for marcador in MARCADORES_INICIO:
-        idx = texto_upper.find(marcador)
-        if idx != -1 and (idx_inicio == -1 or idx < idx_inicio):
-            idx_inicio = idx
-    
-    pagina_inicio = None
-    if idx_inicio != -1:
-        for num_pag in paginas:
-            marcador_pag = f"[PAGINA_{num_pag}]"
-            if marcador_pag in texto_completo[:idx_inicio]:
-                pagina_inicio = num_pag
-    
-    # Retorna o texto inteiro (sem marcadores de página) - quebrar_em_portarias
-    # vai fazer o filtro pelo padrão característico das portarias.
-    texto_limpo = re.sub(r'\[PAGINA_\d+\]', '', texto_completo)
-    return texto_limpo.strip(), pagina_inicio
-
-
-def normalizar_texto(texto: str) -> str:
-    texto = re.sub(r'-\s*\n\s*', '', texto)
-    texto = re.sub(r'\s*\n\s*', ' ', texto)
-    texto = re.sub(r'\s+', ' ', texto)
-    return texto.strip()
-
-
-def quebrar_em_portarias(texto_secao: str) -> list:
-    """Identifica portarias/atos da seção de Inspeção/Regulação Escolar.
-    
-    Suporta os 3 formatos identificados ao longo dos anos:
-    
-    1. PORTARIA N.º X/AAAA  (2021)
-    2. PORTARIA SEE N.º X/AAAA  (2023, 2025)
-    3. Atos sem número explícito (2020, 2022) — começam com 
-       "Nos termos do artigo 12/13 da Resolução SEE..." e terminam com "SRE – nome"
-    
-    Estratégia: localiza âncoras pelo INÍCIO DOS ATOS — seja "PORTARIA N.º" ou
-    "Nos termos do artigo X da Resolução SEE" — e captura cada bloco até a próxima 
-    âncora. Filtra por sinais característicos (Resolução SEE + termina com SRE –) 
-    para descartar texto de outras seções.
-    
-    Atos sem número recebem identificadores sequenciais "S/N-NNN/AAAA" baseados
-    na ordem de aparição no documento.
-    """
-    # Âncoras de início de bloco — qualquer uma dessas marca um novo ato
-    padrao_portaria = r'PORTARIA(?:\s+SEE)?\s+N[\.\s]*[ºoº°]?\s*(\d+)\s*/\s*(\d{4})'
-    padrao_nos_termos = r'Nos\s+termos\s+do\s+artigo\s+1[23]\s+da\s+Resolu[çc][ãa]o\s+SEE'
-    
-    # Coletar TODAS as âncoras (com tipo) e ordenar por posição
-    ancoras = []
-    
-    for m in re.finditer(padrao_portaria, texto_secao, re.IGNORECASE):
-        ancoras.append({
-            "pos": m.start(),
-            "tipo": "portaria",
-            "numero": m.group(1),
-            "ano": m.group(2),
-        })
-    
-    for m in re.finditer(padrao_nos_termos, texto_secao, re.IGNORECASE):
-        ancoras.append({
-            "pos": m.start(),
-            "tipo": "ato",
-            "numero": None,
-            "ano": None,
-        })
-    
-    # Ordenar por posição
-    ancoras.sort(key=lambda a: a["pos"])
-    
-    # Remover âncoras "ato" que estão DENTRO de uma portaria já identificada
-    # (uma portaria começa com "PORTARIA N.º X" e DEPOIS tem "Nos termos do artigo...")
-    ancoras_finais = []
-    for i, a in enumerate(ancoras):
-        if a["tipo"] == "ato":
-            # Se houver uma "portaria" muito próxima ANTES (até 300 chars),
-            # esse "Nos termos" é parte da portaria, não um novo ato.
-            tem_portaria_antes = any(
-                p["tipo"] == "portaria" and 0 < a["pos"] - p["pos"] < 300
-                for p in ancoras_finais[-3:]  # olha as últimas 3 ancoras
-            )
-            if tem_portaria_antes:
-                continue
-        ancoras_finais.append(a)
-    
-    portarias = []
-    vistos = set()
-    contador_sn = {}  # ano → contador de atos sem número
-    
-    for i, ancora in enumerate(ancoras_finais):
-        inicio = ancora["pos"]
-        fim = ancoras_finais[i + 1]["pos"] if i + 1 < len(ancoras_finais) else len(texto_secao)
-        
-        if fim - inicio > 5000:
-            fim = inicio + 5000
-        
-        texto_portaria = texto_secao[inicio:fim].strip()
-        
-        # FILTRO: portarias/atos de inspeção escolar têm:
-        #   1. Mencionam "Resolução SEE" ou "artigo 12/13"
-        #   2. Terminam com "SRE –" (com travessão)
-        cabecalho = texto_portaria[:600]
-        tem_resolucao = bool(re.search(
-            r'Resolu[çc][ãa]o\s+SEE|artigo\s+1[23]|art\.?\s*1[23]',
-            cabecalho, re.IGNORECASE
-        ))
-        tem_sre = bool(re.search(r'SRE\s*[–\-]\s*\w', texto_portaria))
-        
-        # Para portarias COM número: também aceita se tiver "PROCESSO N." ou "SEI N."
-        # (essas formas são mais explícitas e existem desde 2023)
-        tem_processo_ou_sei = bool(re.search(
-            r'PROCESSO\s+N[\.\s]*[ºoº°]?|SEI\s+N[\.\s]*[ºoº°]?',
-            cabecalho, re.IGNORECASE
-        ))
-        
-        # Indicadores adicionais de regulação escolar — usados quando
-        # o ato não termina com "SRE –" (caso de atos de turmas em comunidades,
-        # como ocorre em 2022 com "vinculada à Escola Municipal X, em Y").
-        tem_indicadores_escolares = bool(re.search(
-            r'Escola\s+Municipal|Col[ée]gio\s+|Centro\s+Educacional|'
-            r'Ensino\s+Fundamental|Ensino\s+M[ée]dio|'
-            r'vinculada\s+[àa]\s+Escola|ministrad[oa]\s+pel[oa]\s+(?:Col[ée]gio|Escola)|'
-            r'situad[oa]\s+na\s+(?:R\.|Av\.|Rua|Avenida|Pra[çc]a)',
-            texto_portaria, re.IGNORECASE
-        ))
-        
-        if ancora["tipo"] == "portaria":
-            # Portarias com número: precisa de Resolução + (SRE OU Processo/SEI)
-            if not tem_resolucao or not (tem_sre or tem_processo_ou_sei):
-                continue
-            numero = ancora["numero"]
-            ano = ancora["ano"]
-            chave = f"{numero}/{ano}"
-            numero_int = int(numero)
-        else:
-            # Atos sem número: precisa de Resolução + (SRE OU indicadores escolares fortes)
-            # Atos de criação/funcionamento de turmas em comunidades raramente terminam
-            # com "SRE –", mas sempre mencionam "vinculada à Escola Municipal X" ou afins.
-            if not tem_resolucao:
-                continue
-            if not (tem_sre or tem_indicadores_escolares):
-                continue
-            
-            # Atos sem número não têm "ano oficial" próprio — são publicados no
-            # diário e o ano correto é o da publicação. Aqui usamos placeholder
-            # "0000" e a numeração sequencial é absoluta (não agrupada por ano);
-            # parsear_portaria substitui "0000" pelo ano de data_diario depois.
-            ano = "0000"
-            
-            contador_sn["_total"] = contador_sn.get("_total", 0) + 1
-            seq = contador_sn["_total"]
-            chave = f"S/N-{seq:03d}/{ano}"
-            numero_int = None  # banco aceita NULL agora
-        
-        if chave in vistos:
-            continue
-        vistos.add(chave)
-        
-        portarias.append({
-            "numero_completo": chave,
-            "numero": numero_int,
-            "ano": int(ano),
-            "texto": texto_portaria,
-        })
-    
-    # Ordenar: primeiro portarias com número, depois sem número (S/N)
-    def chave_ordenacao(p):
-        eh_sem_numero = p["numero"] is None
-        return (p["ano"], eh_sem_numero, p["numero"] or 0)
-    
-    portarias.sort(key=chave_ordenacao)
-    return portarias
-
-
-def extrair_enderecos(texto: str) -> tuple:
-    match = re.search(
-        r'd[ao]\s+'
-        r'((?:R\.|Rua|Av\.|Avenida|Praça|Pça\.)\s+[^,]+?[\s,]+[\d/]+(?:/\d+)*(?:,\s*[\wÀ-ÿ\.\s]+?)?)'
-        r'(?:,\s*em\s+[A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ\s]+?)?'
-        r',?\s+para\s+(?:a\s+)?'
-        r'((?:R\.|Rua|Av\.|Avenida|Praça|Pça\.)\s+[^,]+?,\s*\d+(?:/\d+)*(?:,\s*[\wÀ-ÿ\.\s]+?)?)'
-        r'(?:,\s*no\s+mesmo|\.|,\s*em\s+[A-Z])',
-        texto, re.IGNORECASE
-    )
-    if match:
-        return match.group(1).strip().rstrip(','), match.group(2).strip().rstrip(',')
-    return None, None
-
-
-def detectar_tipo_acao(texto: str) -> str:
-    txt = texto.lower()
-    if "ficam revogados os atos de autorização" in txt:
-        return "cessacao"
-    if re.search(r'ltda[\w\s\-–\.]+para[\w\s\-–\.]+ltda', txt, re.IGNORECASE):
-        return "mudanca_mantenedora"
-    if "autoriza" in txt and ("funcionamento" in txt or "turma" in txt):
-        return "autorizacao"
-    if re.search(r'funcionamento\s+de\s+\d+\s*\([\w\s]+\)\s*turma', txt):
-        return "autorizacao"
-    if "mudança de denominação do logradouro" in txt or "logradouro" in txt:
-        return "mudanca_logradouro"
-    if "mudança do prédio" in txt or "mudança de prédio" in txt or "mudança de endereço" in txt:
-        return "mudanca_predio"
-
-    enderecos = extrair_enderecos(texto)
-    if enderecos[0] and enderecos[1] and "no mesmo município" in txt:
-        def num_bairro(end):
-            m = re.search(r',\s*([\d/]+)\s*,\s*([\wÀ-ÿ\.\s]+)$', end)
-            return (m.group(1).strip(), m.group(2).strip().lower()) if m else (None, None)
-        n_a, b_a = num_bairro(enderecos[0])
-        n_n, b_n = num_bairro(enderecos[1])
-        if n_a and n_a == n_n and b_a == b_n:
-            return "mudanca_logradouro"
-        return "mudanca_predio"
-    return "outros"
-
-
-def extrair_sre(texto: str) -> Optional[str]:
-    match = re.search(r'SRE\s*[–\-—]\s*([A-ZÁÉÍÓÚÂÊÔÃÕÇa-zÀ-ÿ][\wÀ-ÿ\s]*?)\s*$', texto)
-    return match.group(1).strip() if match else None
-
-
-def extrair_escola(texto: str) -> tuple:
-    padroes = [
-        r'(Escola\s+(?:Municipal\s+|Estadual\s+|Particular\s+)?[A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ\s\-–]+?)(?:,\s*de\s+(Ensino\s+\w+(?:\s+e\s+\w+)?)\s*(?:\(([\wÀ-ÿ\s]+?)\))?|,\s*em\s+|,\s*situad)',
-        r'(Centro\s+Educacional\s+[A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ\s\-]+?),\s*de\s+(Ensino\s+\w+(?:\s+e\s+\w+)?)',
-        r'(Colégio\s+[A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ\s]+?)(?:,|\s+situad)',
-    ]
-    for padrao in padroes:
-        match = re.search(padrao, texto)
-        if match:
-            nome = match.group(1).strip().rstrip(',').strip()
-            etapa = match.group(2).strip() if match.lastindex and match.lastindex >= 2 and match.group(2) else None
-            modalidade = match.group(3).strip() if match.lastindex and match.lastindex >= 3 and match.group(3) else None
-            if not modalidade:
-                m = re.search(r'\(((?:anos\s+iniciais|anos\s+finais|EJA|integral)[^)]*)\)', texto, re.IGNORECASE)
-                if m:
-                    modalidade = m.group(1).strip()
-            return nome, etapa, modalidade
-    return None, None, None
-
-
-def extrair_municipio(texto: str) -> Optional[str]:
-    match = re.search(r'em\s+([A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ]+(?:\s+(?:de|do|da|das|dos)?\s*[A-ZÁÉÍÓÚÂÊÔÃÕÇ]?[\wÀ-ÿ]+){0,4}?)\.\s*SRE', texto)
-    if match:
-        return match.group(1).strip()
-    match = re.search(r'em\s+([A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ]+(?:\s+[A-ZÁÉÍÓÚÂÊÔÃÕÇ]?[\wÀ-ÿ]+){0,3}?)\s+para\s+(?:R\.|Rua|Av\.|Avenida|Praça|a\s+R\.|a\s+Av)', texto)
-    if match:
-        return match.group(1).strip()
-    if "no mesmo município" in texto:
-        match = re.search(r'em\s+([A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ]+(?:\s+[A-ZÁÉÍÓÚÂÊÔÃÕÇ]?[\wÀ-ÿ]+){0,3}?)\s+para', texto)
-        if match:
-            return match.group(1).strip()
-    matches = list(re.finditer(r'em\s+([A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ]+(?:\s+[A-ZÁÉÍÓÚÂÊÔÃÕÇ]?[\wÀ-ÿ]+){0,3}?)[,\.]', texto))
-    if matches:
-        return matches[-1].group(1).strip()
-    return None
-
-
-def extrair_mantenedoras(texto: str) -> tuple:
-    match = re.search(
-        r'(?:de\s+|d[ao]\s+empresa\s+)([A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ\s\-–\.]+?Ltda(?:\s*[–\-]\s*ME)?)\s+para\s+(?:entidade\s+|empresa\s+)?([A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ\s\-–\.]+?Ltda(?:\s*[–\-]\s*ME)?)',
-        texto
-    )
-    if match:
-        return match.group(1).strip(), match.group(2).strip()
-    return None, None
-
-
-def extrair_bases_legais(texto: str) -> list:
-    bases = []
-    encontrados = set()
-    padroes = [
-        r'Resolução\s+(?:SEE|CEE|SEPLAG)\s+n[º\.°o]\s*[\d\.]+,\s*de\s+\d+\s+de\s+\w+\s+de\s+\d{4}',
-        r'Portaria\s+(?:SEE|CEE)\s+n[º\.°o]\s*[\d\.]+,\s*de\s+\d+\s+de\s+\w+\s+de\s+\d{4}',
-        r'Lei\s+(?:Complementar\s+)?n[º\.°o]\s*[\d\.]+,\s*de\s+\d+\s+de\s+\w+\s+de\s+\d{4}',
-        r'Decreto\s+n[º\.°o]\s*[\d\.]+,\s*de\s+\d+\s+de\s+\w+\s+de\s+\d{4}',
-        r'Resolução\s+(?:SEE|CEE|SEPLAG)\s+n[º\.°o]\s*[\d\.]+',
-        r'Portaria\s+(?:SEE|CEE)\s+n[º\.°o]\s*[\d\.]+',
-    ]
-    for padrao in padroes:
-        for match in re.finditer(padrao, texto, re.IGNORECASE):
-            base = match.group(0).strip().rstrip(',.')
-            chave = re.sub(r'[\s,].*$', '', base.lower())
-            if chave not in encontrados:
-                encontrados.add(chave)
-                bases.append(base)
-    return bases
-
-
-def extrair_data_diario(nome_arquivo: str, texto_pdf: str, metadata_title: str = "") -> Optional[date]:
-    """Extrai a data do Diário Oficial.
-    
-    Ordem de prioridade:
-    1. Metadata 'title' do PDF — Diários do INFOLEDBH vêm com nome padronizado
-       "Diário_do_Executivo_AAAA-MM-DD.pdf" embutido, MESMO se a usuária
-       renomear o arquivo. Esta é a fonte mais confiável.
-    2. Nome do arquivo — caso a usuária renomeie pra algo com data.
-    3. Texto do PDF — fallback final, busca padrões "DIA-FEIRA, DD DE MES DE AAAA"
-       ou "Belo Horizonte, DD de mês de AAAA". Pode ser impreciso, pois capas
-       de Diários geralmente têm o cabeçalho renderizado como imagem (não texto).
-    """
-    meses = {
-        'janeiro': 1, 'fevereiro': 2, 'março': 3, 'marco': 3, 'abril': 4,
-        'maio': 5, 'junho': 6, 'julho': 7, 'agosto': 8,
-        'setembro': 9, 'outubro': 10, 'novembro': 11, 'dezembro': 12,
-    }
-    
-    # 1) Metadata title — formato "Diário_do_Executivo_AAAA-MM-DD.pdf"
-    if metadata_title:
-        match = re.search(r'(\d{4})[-_](\d{2})[-_](\d{2})', metadata_title)
-        if match:
-            try:
-                return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
-            except ValueError:
-                pass
-        # Tentar formato DD-MM-AAAA também no metadata
-        match = re.search(r'(\d{2})[-_](\d{2})[-_](\d{4})', metadata_title)
-        if match:
-            try:
-                return date(int(match.group(3)), int(match.group(2)), int(match.group(1)))
-            except ValueError:
-                pass
-    
-    # 2) Nome do arquivo
-    match = re.search(r'(\d{4})[-_]?(\d{2})[-_]?(\d{2})', nome_arquivo)
-    if match:
-        try:
-            return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
-        except ValueError:
-            pass
-    match = re.search(r'(\d{2})[-_](\d{2})[-_](\d{4})', nome_arquivo)
-    if match:
-        try:
-            return date(int(match.group(3)), int(match.group(2)), int(match.group(1)))
-        except ValueError:
-            pass
-    
-    # 3) Texto do PDF — cabeçalho com dia da semana
-    match = re.search(
-        r'(?:SEGUNDA|TER[ÇC]A|QUARTA|QUINTA|SEXTA|S[ÁA]BADO|DOMINGO)[\s\-]*FEIRA?,?\s*(\d{1,2})\s+DE\s+(\w+)\s+DE\s+(\d{4})',
-        texto_pdf, re.IGNORECASE
-    )
-    if match:
-        try:
-            mes = meses.get(match.group(2).lower())
-            if mes:
-                return date(int(match.group(3)), mes, int(match.group(1)))
-        except (ValueError, KeyError):
-            pass
-    # 4) Texto do PDF — "Belo Horizonte, aos DD de mês de AAAA"
-    match = re.search(
-        r'(\d{1,2})\s+DE\s+(janeiro|fevereiro|mar[çc]o|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)\s+DE\s+(\d{4})',
-        texto_pdf[:10000], re.IGNORECASE
-    )
-    if match:
-        try:
-            mes = meses.get(match.group(2).lower())
-            if mes:
-                return date(int(match.group(3)), mes, int(match.group(1)))
-        except (ValueError, KeyError):
-            pass
-    return None
-
-
-def parsear_portaria(portaria: dict, nome_arquivo: str, pagina, data_diario) -> dict:
-    texto_original = portaria["texto"]
-    texto_norm = normalizar_texto(texto_original)
-    nome_escola, etapa, modalidade = extrair_escola(texto_norm)
-    end_ant, end_novo = extrair_enderecos(texto_norm)
-    mant_ant, mant_nova = extrair_mantenedoras(texto_norm)
-    
-    # Para atos sem número (numero == None), o ano correto é sempre o do
-    # data_diario — atos sem número não têm "ano oficial" próprio. Para
-    # portarias com número (PORTARIA N.º X/AAAA), o ano vem do próprio número.
-    ano = portaria["ano"]
-    numero_completo = portaria["numero_completo"]
-    eh_sem_numero = portaria["numero"] is None
-    
-    if eh_sem_numero and data_diario:
-        ano = data_diario.year
-        # Substitui o placeholder "0000" pelo ano real do diário
-        numero_completo = numero_completo.replace("/0000", f"/{ano}")
-    elif ano == 0 and data_diario:
-        # Fallback geral
-        ano = data_diario.year
-        numero_completo = numero_completo.replace("/0000", f"/{ano}")
-    
-    return {
-        "numero_portaria": portaria["numero"],
-        "ano": ano,
-        "numero_completo": numero_completo,
-        "tipo_acao": detectar_tipo_acao(texto_norm),
-        "escola_nome": nome_escola,
-        "escola_etapa": etapa,
-        "escola_modalidade": modalidade,
-        "municipio": extrair_municipio(texto_norm),
-        "sre": extrair_sre(texto_norm),
-        "endereco_anterior": end_ant,
-        "endereco_novo": end_novo,
-        "mantenedora_anterior": mant_ant,
-        "mantenedora_nova": mant_nova,
-        "bases_legais": extrair_bases_legais(texto_norm) or None,
-        "data_diario": data_diario.isoformat() if data_diario else None,
-        "nome_arquivo_pdf": nome_arquivo,
-        "pagina_pdf": pagina,
-        "texto_completo": texto_original,
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Extrator de Portarias — Diário Oficial MG</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --ink: #1a1814;
+      --paper: #f4f0e8;
+      --paper-dark: #e8e2d4;
+      --accent: #a02c2c;
+      --accent-soft: #c44545;
+      --gold: #b8924f;
+      --green: #4a6741;
+      --amber: #c98a2e;
+      --rule: #2a2620;
+      --muted: #6b6457;
+      --shadow: 0 4px 12px rgba(26, 24, 20, 0.08);
     }
 
+    * { box-sizing: border-box; margin: 0; padding: 0; }
 
-class handler(BaseHTTPRequestHandler):
-    def _cors_headers(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--paper);
+      background-image:
+        repeating-linear-gradient(0deg, transparent, transparent 28px, rgba(26, 24, 20, 0.025) 28px, rgba(26, 24, 20, 0.025) 29px),
+        radial-gradient(circle at 20% 10%, rgba(184, 146, 79, 0.06) 0%, transparent 40%),
+        radial-gradient(circle at 80% 60%, rgba(160, 44, 44, 0.04) 0%, transparent 40%);
+      color: var(--ink);
+      min-height: 100vh;
+      padding: 40px 20px;
+    }
 
-    def do_OPTIONS(self):
-        self.send_response(204)
-        self._cors_headers()
-        self.end_headers()
+    .container {
+      max-width: 1100px;
+      margin: 0 auto;
+    }
 
-    def _json_response(self, status, data):
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self._cors_headers()
-        self.end_headers()
-        self.wfile.write(json.dumps(data, ensure_ascii=False, default=str).encode("utf-8"))
+    .masthead {
+      border-top: 4px double var(--ink);
+      border-bottom: 4px double var(--ink);
+      padding: 32px 0 24px;
+      margin-bottom: 48px;
+      text-align: center;
+      position: relative;
+    }
 
-    def do_POST(self):
-        try:
-            if not SUPABASE_URL or not SUPABASE_KEY:
-                return self._json_response(500, {
-                    "error": "SUPABASE_URL e SUPABASE_SERVICE_KEY não configuradas"
-                })
+    .masthead::before, .masthead::after {
+      content: "";
+      position: absolute;
+      left: 0; right: 0;
+      height: 1px;
+      background: var(--ink);
+    }
+    .masthead::before { top: 7px; }
+    .masthead::after { bottom: 7px; }
 
-            content_length = int(self.headers.get("Content-Length", 0))
-            if content_length == 0:
-                return self._json_response(400, {"error": "Body vazio"})
+    .masthead-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 18px;
+      padding: 0 8px;
+    }
 
-            body = self.rfile.read(content_length)
-            try:
-                payload = json.loads(body)
-            except json.JSONDecodeError:
-                return self._json_response(400, {"error": "JSON inválido"})
+    .masthead h1 {
+      font-family: 'Fraunces', serif;
+      font-weight: 600;
+      font-size: clamp(2.5rem, 6vw, 4.5rem);
+      line-height: 1;
+      letter-spacing: -0.02em;
+      margin-bottom: 8px;
+      font-variation-settings: "opsz" 144;
+    }
 
-            storage_path = payload.get("storage_path")
-            nome_arquivo = payload.get("nome_arquivo", storage_path)
+    .masthead h1 em {
+      font-style: italic;
+      font-weight: 500;
+      color: var(--accent);
+    }
 
-            if not storage_path:
-                return self._json_response(400, {"error": "storage_path é obrigatório"})
+    .masthead-sub {
+      font-family: 'Fraunces', serif;
+      font-style: italic;
+      font-size: 1.1rem;
+      color: var(--muted);
+      letter-spacing: 0.02em;
+    }
 
-            # Conecta no Supabase e baixa o arquivo do Storage
-            supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    .upload-section { margin-bottom: 32px; }
 
-            try:
-                pdf_bytes = supabase.storage.from_(BUCKET_NAME).download(storage_path)
-            except Exception as e:
-                return self._json_response(500, {
-                    "error": f"Erro ao baixar do Storage: {str(e)[:200]}"
-                })
+    .section-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
 
-            # Salva temp file (PyMuPDF precisa de path)
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                tmp.write(pdf_bytes)
-                tmp_path = tmp.name
+    .section-label::before {
+      content: "";
+      width: 24px;
+      height: 1px;
+      background: var(--ink);
+    }
 
-            try:
-                texto, paginas, metadata_title = extrair_texto_pdf(tmp_path)
-            finally:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
+    .dropzone {
+      border: 2px dashed var(--rule);
+      background: rgba(255, 255, 255, 0.4);
+      border-radius: 4px;
+      padding: 60px 32px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.25s ease;
+    }
 
-            data_diario = extrair_data_diario(nome_arquivo, texto, metadata_title)
-            texto_secao, pagina_secao = localizar_secao(texto, paginas)
+    .dropzone:hover {
+      border-color: var(--accent);
+      background: rgba(255, 255, 255, 0.7);
+    }
 
-            # texto_secao agora retorna o texto completo do PDF.
-            # A filtragem de portarias é feita por padrão em quebrar_em_portarias.
-            portarias_brutas = quebrar_em_portarias(texto_secao or "")
-            
-            if not portarias_brutas:
-                return self._json_response(200, {
-                    "arquivo": nome_arquivo,
-                    "secao_encontrada": False,
-                    "portarias_extraidas": 0,
-                    "portarias_inseridas": 0,
-                    "portarias": [],
-                    "mensagem": "Nenhuma portaria de Inspeção Escolar encontrada neste PDF",
-                })
-            
-            portarias = [parsear_portaria(p, nome_arquivo, pagina_secao, data_diario) for p in portarias_brutas]
+    .dropzone.drag-active {
+      border-color: var(--accent);
+      background: rgba(196, 69, 69, 0.05);
+      transform: scale(1.005);
+    }
 
-            inseridas = 0
-            duplicadas = 0
-            erros = []
-            for p in portarias:
-                try:
-                    supabase.table("portarias_inspecao").insert(p).execute()
-                    inseridas += 1
-                except Exception as e:
-                    msg = str(e)
-                    if "duplicate" in msg.lower() or "unique" in msg.lower():
-                        duplicadas += 1
-                    else:
-                        erros.append({"portaria": p["numero_completo"], "erro": msg[:200]})
+    .dropzone-icon {
+      width: 56px;
+      height: 56px;
+      margin: 0 auto 20px;
+      stroke: var(--ink);
+      stroke-width: 1.2;
+      fill: none;
+      transition: transform 0.3s ease, stroke 0.3s ease;
+    }
 
-            return self._json_response(200, {
-                "arquivo": nome_arquivo,
-                "secao_encontrada": True,
-                "pagina": pagina_secao,
-                "data_diario": data_diario.isoformat() if data_diario else None,
-                "portarias_extraidas": len(portarias),
-                "portarias_inseridas": inseridas,
-                "portarias_duplicadas": duplicadas,
-                "erros": erros,
-                "portarias": [
-                    {
-                        "numero_completo": p["numero_completo"],
-                        "tipo_acao": p["tipo_acao"],
-                        "escola_nome": p["escola_nome"],
-                        "escola_etapa": p["escola_etapa"],
-                        "municipio": p["municipio"],
-                        "sre": p["sre"],
-                        "endereco_anterior": p["endereco_anterior"],
-                        "endereco_novo": p["endereco_novo"],
-                        "mantenedora_anterior": p["mantenedora_anterior"],
-                        "mantenedora_nova": p["mantenedora_nova"],
-                        "texto_completo": p["texto_completo"],
-                    }
-                    for p in portarias
-                ],
-            })
+    .dropzone:hover .dropzone-icon,
+    .dropzone.drag-active .dropzone-icon {
+      transform: translateY(-4px);
+      stroke: var(--accent);
+    }
 
-        except Exception as e:
-            import traceback
-            return self._json_response(500, {
-                "error": str(e),
-                "trace": traceback.format_exc()[:1000],
-            })
+    .dropzone-title {
+      font-family: 'Fraunces', serif;
+      font-size: 1.6rem;
+      font-weight: 500;
+      margin-bottom: 8px;
+    }
+
+    .dropzone-hint {
+      font-size: 0.9rem;
+      color: var(--muted);
+      margin-bottom: 20px;
+    }
+
+    .dropzone-button {
+      display: inline-block;
+      background: var(--ink);
+      color: var(--paper);
+      padding: 12px 28px;
+      border: none;
+      border-radius: 2px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .dropzone-button:hover {
+      background: var(--accent);
+      transform: translateY(-1px);
+      box-shadow: var(--shadow);
+    }
+
+    #file-input { display: none; }
+
+    .file-list {
+      margin-top: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .file-item {
+      background: rgba(255, 255, 255, 0.6);
+      border: 1px solid var(--paper-dark);
+      border-radius: 3px;
+      padding: 16px 20px;
+      display: grid;
+      grid-template-columns: auto 1fr auto auto;
+      align-items: center;
+      gap: 16px;
+      transition: all 0.2s ease;
+    }
+
+    .file-item.uploading,
+    .file-item.processing {
+      border-color: var(--amber);
+      background: rgba(201, 138, 46, 0.05);
+    }
+
+    .file-item.success {
+      border-color: var(--green);
+      background: rgba(74, 103, 65, 0.05);
+    }
+
+    .file-item.error {
+      border-color: var(--accent);
+      background: rgba(160, 44, 44, 0.05);
+    }
+
+    .file-icon {
+      width: 32px;
+      height: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--paper);
+      border: 1px solid var(--rule);
+      border-radius: 2px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      font-weight: 600;
+      flex-shrink: 0;
+    }
+
+    .file-item.uploading .file-icon,
+    .file-item.processing .file-icon {
+      animation: pulse 1.5s ease infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .file-info { min-width: 0; }
+
+    .file-name {
+      font-family: 'Fraunces', serif;
+      font-size: 1rem;
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-bottom: 2px;
+    }
+
+    .file-meta {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .file-status {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      padding: 4px 10px;
+      border-radius: 2px;
+    }
+
+    .file-status.pending { color: var(--muted); border: 1px solid var(--paper-dark); }
+    .file-status.uploading { color: var(--amber); border: 1px solid var(--amber); }
+    .file-status.processing { color: var(--amber); border: 1px solid var(--amber); }
+    .file-status.success { color: var(--green); border: 1px solid var(--green); }
+    .file-status.error { color: var(--accent); border: 1px solid var(--accent); }
+
+    .file-remove {
+      background: none;
+      border: 1px solid var(--paper-dark);
+      width: 28px;
+      height: 28px;
+      border-radius: 2px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      transition: all 0.2s ease;
+    }
+
+    .file-remove:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .file-remove:disabled {
+      opacity: 0.3;
+      cursor: not-allowed;
+    }
+
+    .actions {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 24px;
+      padding: 20px 0;
+      border-top: 1px solid var(--paper-dark);
+    }
+
+    .actions-summary {
+      font-family: 'Fraunces', serif;
+      font-style: italic;
+      color: var(--muted);
+    }
+
+    .actions-summary strong {
+      color: var(--ink);
+      font-style: normal;
+      font-weight: 600;
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: var(--paper);
+      border: none;
+      padding: 14px 32px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      cursor: pointer;
+      border-radius: 2px;
+      transition: all 0.2s ease;
+    }
+
+    .btn-primary:hover:not(:disabled) {
+      background: var(--accent-soft);
+      transform: translateY(-1px);
+      box-shadow: 0 6px 16px rgba(160, 44, 44, 0.2);
+    }
+
+    .btn-primary:disabled {
+      background: var(--muted);
+      cursor: not-allowed;
+      opacity: 0.5;
+    }
+
+    .results-section { margin-top: 56px; display: none; }
+    .results-section.active { display: block; }
+
+    .results-header {
+      border-top: 2px solid var(--ink);
+      padding-top: 24px;
+      margin-bottom: 24px;
+    }
+
+    .results-title {
+      font-family: 'Fraunces', serif;
+      font-size: 2rem;
+      font-weight: 500;
+      margin-bottom: 4px;
+    }
+
+    .results-subtitle {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 16px;
+      margin-bottom: 32px;
+    }
+
+    .stat-card {
+      background: rgba(255, 255, 255, 0.6);
+      border: 1px solid var(--paper-dark);
+      padding: 20px;
+      border-radius: 3px;
+    }
+
+    .stat-card.accent {
+      border-color: var(--accent);
+      background: rgba(160, 44, 44, 0.03);
+    }
+
+    .stat-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+
+    .stat-value {
+      font-family: 'Fraunces', serif;
+      font-size: 2.4rem;
+      font-weight: 600;
+      line-height: 1;
+      color: var(--ink);
+      font-variation-settings: "opsz" 144;
+    }
+
+    .stat-value.accent { color: var(--accent); }
+
+    .portarias-list { display: flex; flex-direction: column; gap: 16px; }
+
+    .portaria-card {
+      background: rgba(255, 255, 255, 0.5);
+      border: 1px solid var(--paper-dark);
+      border-left: 3px solid var(--ink);
+      padding: 20px 24px;
+      border-radius: 2px;
+    }
+
+    .portaria-card[data-tipo="cessacao"] { border-left-color: var(--accent); }
+    .portaria-card[data-tipo="autorizacao"] { border-left-color: var(--green); }
+    .portaria-card[data-tipo="mudanca_logradouro"],
+    .portaria-card[data-tipo="mudanca_predio"] { border-left-color: var(--gold); }
+    .portaria-card[data-tipo="mudanca_mantenedora"] { border-left-color: var(--amber); }
+
+    .portaria-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .portaria-numero {
+      font-family: 'Fraunces', serif;
+      font-size: 1.3rem;
+      font-weight: 600;
+    }
+
+    .portaria-tipo {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      padding: 4px 8px;
+      background: var(--paper-dark);
+      border-radius: 2px;
+      color: var(--ink);
+    }
+
+    .portaria-escola {
+      font-family: 'Fraunces', serif;
+      font-size: 1.05rem;
+      font-style: italic;
+      margin-bottom: 12px;
+    }
+
+    .portaria-meta {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 8px;
+      font-size: 0.85rem;
+    }
+
+    .meta-item { display: flex; flex-direction: column; gap: 2px; }
+
+    .meta-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .portaria-toggle {
+      margin-top: 16px;
+      padding-top: 14px;
+      border-top: 1px dashed var(--paper-dark);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: none;
+      border-bottom: none;
+      border-left: none;
+      border-right: none;
+      cursor: pointer;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--muted);
+      padding-left: 0;
+      padding-right: 0;
+      transition: color 0.2s;
+      width: 100%;
+      justify-content: flex-start;
+    }
+
+    .portaria-toggle:hover { color: var(--accent); }
+
+    .portaria-toggle .caret {
+      display: inline-block;
+      transition: transform 0.2s;
+      font-size: 9px;
+    }
+
+    .portaria-card[data-expanded="true"] .portaria-toggle .caret {
+      transform: rotate(90deg);
+    }
+
+    .portaria-texto {
+      display: none;
+      margin-top: 14px;
+      padding: 16px 18px;
+      background: rgba(255, 252, 245, 0.65);
+      border: 1px solid var(--paper-dark);
+      border-radius: 2px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      line-height: 1.7;
+      color: var(--ink);
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      max-height: 420px;
+      overflow-y: auto;
+    }
+
+    .portaria-card[data-expanded="true"] .portaria-texto {
+      display: block;
+    }
+
+    .meta-value { font-weight: 500; }
+
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: var(--ink);
+      color: var(--paper);
+      padding: 14px 24px;
+      border-radius: 3px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      letter-spacing: 0.1em;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.2);
+      transform: translateY(150%);
+      transition: transform 0.3s ease;
+      z-index: 100;
+    }
+
+    .toast.show { transform: translateY(0); }
+    .toast.error { background: var(--accent); }
+    .toast.success { background: var(--green); }
+
+    .footer {
+      margin-top: 80px;
+      padding-top: 24px;
+      border-top: 1px solid var(--paper-dark);
+      text-align: center;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    @media (max-width: 640px) {
+      body { padding: 20px 12px; }
+      .file-item { grid-template-columns: auto 1fr; grid-template-rows: auto auto; }
+      .file-status, .file-remove { grid-column: 2; justify-self: end; }
+      .actions { flex-direction: column; gap: 16px; align-items: stretch; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+
+    <header class="masthead">
+      <div class="masthead-meta">
+        <span id="data-hoje">—</span>
+        <span>EDIÇÃO DIGITAL · MINAS GERAIS</span>
+        <span>EXTRAÇÃO AUTOMÁTICA</span>
+      </div>
+      <h1>Extrator de <em>Portarias</em></h1>
+      <p class="masthead-sub">Assessoria de Inspeção Escolar — Diário Oficial</p>
+    </header>
+
+    <section class="upload-section">
+      <p class="section-label">Inserir Documentos</p>
+
+      <div class="dropzone" id="dropzone">
+        <svg class="dropzone-icon" viewBox="0 0 64 64">
+          <path d="M16 40v8a4 4 0 0 0 4 4h24a4 4 0 0 0 4-4v-8" />
+          <path d="M32 12v28" />
+          <path d="M22 22l10-10 10 10" />
+        </svg>
+        <p class="dropzone-title">Arraste os PDFs do diário aqui</p>
+        <p class="dropzone-hint">ou clique no botão para selecionar arquivos · até 50MB cada</p>
+        <button class="dropzone-button" type="button" id="select-btn">
+          Selecionar PDFs
+        </button>
+        <input type="file" id="file-input" accept="application/pdf,.pdf" multiple />
+      </div>
+
+      <div class="file-list" id="file-list"></div>
+
+      <div class="actions" id="actions" style="display: none;">
+        <p class="actions-summary" id="summary">
+          <strong>0</strong> arquivos selecionados
+        </p>
+        <button class="btn-primary" id="process-btn" disabled>
+          Processar Diários
+        </button>
+      </div>
+    </section>
+
+    <section class="results-section" id="results">
+      <div class="results-header">
+        <h2 class="results-title">Portarias Extraídas</h2>
+        <p class="results-subtitle">Inseridas no Banco de Dados</p>
+      </div>
+
+      <div class="stats-grid" id="stats-grid"></div>
+
+      <div class="portarias-list" id="portarias-list"></div>
+    </section>
+
+    <footer class="footer">
+      Pacto Educacional · Sistema de Extração de Portarias · 2026
+    </footer>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <!-- Supabase JS Client (CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+  <script>
+    // ============================================================
+    // CONFIGURAÇÃO - obtida da API /api/config (env vars)
+    // ============================================================
+    const BUCKET = 'diarios';
+    const API_ENDPOINT = '/api/processar';
+    const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
+    // ============================================================
+
+    let sb = null; // será inicializado após buscar config
+    let selectedFiles = [];
+    let allPortarias = [];
+
+    // Inicializa o Supabase client buscando config da API
+    async function initSupabase() {
+      try {
+        const res = await fetch('/api/config');
+        const cfg = await res.json();
+        if (!cfg.supabase_url || !cfg.supabase_anon_key) {
+          throw new Error('Config incompleta: faltam env vars no Vercel');
+        }
+        const { createClient } = supabase;
+        sb = createClient(cfg.supabase_url, cfg.supabase_anon_key);
+        return true;
+      } catch (err) {
+        showToast(`Erro ao carregar config: ${err.message}`, 'error');
+        return false;
+      }
+    }
+
+    async function carregarHistorico() {
+      try {
+        const res = await fetch('/api/listar');
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        if (data.portarias && data.portarias.length > 0) {
+          allPortarias = data.portarias;
+          renderResults();
+          showToast(`${data.portarias.length} portarias carregadas do histórico`, 'success');
+        }
+      } catch (err) {
+        console.warn('Não foi possível carregar histórico:', err.message);
+      }
+    }
+
+    // Data atual
+    const meses = ['JAN', 'FEV', 'MAR', 'ABR', 'MAI', 'JUN', 'JUL', 'AGO', 'SET', 'OUT', 'NOV', 'DEZ'];
+    const hoje = new Date();
+    document.getElementById('data-hoje').textContent =
+      `${String(hoje.getDate()).padStart(2, '0')} ${meses[hoje.getMonth()]} ${hoje.getFullYear()}`;
+
+    // Drag & Drop
+    const dropzone = document.getElementById('dropzone');
+    const fileInput = document.getElementById('file-input');
+    const selectBtn = document.getElementById('select-btn');
+
+    selectBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      fileInput.click();
+    });
+
+    dropzone.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
+
+    ['dragenter', 'dragover'].forEach(ev =>
+      dropzone.addEventListener(ev, (e) => {
+        e.preventDefault();
+        dropzone.classList.add('drag-active');
+      })
+    );
+
+    ['dragleave', 'drop'].forEach(ev =>
+      dropzone.addEventListener(ev, (e) => {
+        e.preventDefault();
+        if (ev === 'drop' || !dropzone.contains(e.relatedTarget)) {
+          dropzone.classList.remove('drag-active');
+        }
+      })
+    );
+
+    dropzone.addEventListener('drop', (e) => handleFiles(e.dataTransfer.files));
+
+    function handleFiles(files) {
+      const novos = Array.from(files).filter(f => {
+        if (f.type !== 'application/pdf' && !f.name.toLowerCase().endsWith('.pdf')) {
+          showToast(`${f.name} não é PDF — ignorado`, 'error');
+          return false;
+        }
+        if (f.size > MAX_FILE_SIZE) {
+          showToast(`${f.name} é muito grande (>50MB) — ignorado`, 'error');
+          return false;
+        }
+        if (selectedFiles.find(s => s.file.name === f.name && s.file.size === f.size)) {
+          return false;
+        }
+        return true;
+      });
+
+      novos.forEach(file => {
+        selectedFiles.push({
+          id: crypto.randomUUID(),
+          file,
+          status: 'pending',
+          result: null,
+        });
+      });
+
+      renderFileList();
+    }
+
+    function renderFileList() {
+      const list = document.getElementById('file-list');
+      const actions = document.getElementById('actions');
+      const summary = document.getElementById('summary');
+      const processBtn = document.getElementById('process-btn');
+
+      list.innerHTML = '';
+
+      if (selectedFiles.length === 0) {
+        actions.style.display = 'none';
+        return;
+      }
+
+      actions.style.display = 'flex';
+      summary.innerHTML = `<strong>${selectedFiles.length}</strong> arquivo${selectedFiles.length > 1 ? 's' : ''} selecionado${selectedFiles.length > 1 ? 's' : ''}`;
+
+      const pendentes = selectedFiles.filter(s => s.status === 'pending').length;
+      processBtn.disabled = pendentes === 0;
+      processBtn.textContent = pendentes > 0
+        ? `Processar ${pendentes} ${pendentes === 1 ? 'Diário' : 'Diários'}`
+        : 'Processado';
+
+      selectedFiles.forEach(item => {
+        const div = document.createElement('div');
+        div.className = `file-item ${item.status}`;
+        div.dataset.id = item.id;
+
+        const sizeMB = (item.file.size / (1024 * 1024)).toFixed(2);
+        const sizeStr = `${sizeMB} MB`;
+
+        const statusText = {
+          pending: 'Aguardando',
+          uploading: 'Enviando',
+          processing: 'Processando',
+          success: `${item.result?.portarias_inseridas || 0} portarias`,
+          error: 'Erro',
+        }[item.status];
+
+        const isDisabled = item.status === 'uploading' || item.status === 'processing';
+
+        div.innerHTML = `
+          <div class="file-icon">PDF</div>
+          <div class="file-info">
+            <p class="file-name">${item.file.name}</p>
+            <p class="file-meta">${sizeStr}${item.result?.error ? ' · ' + item.result.error : ''}</p>
+          </div>
+          <span class="file-status ${item.status}">${statusText}</span>
+          <button class="file-remove" data-remove="${item.id}" ${isDisabled ? 'disabled' : ''}>×</button>
+        `;
+        list.appendChild(div);
+      });
+
+      list.querySelectorAll('[data-remove]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const id = btn.dataset.remove;
+          selectedFiles = selectedFiles.filter(s => s.id !== id);
+          renderFileList();
+        });
+      });
+    }
+
+    // Processamento: upload pro Storage + chamada à API
+    document.getElementById('process-btn').addEventListener('click', async () => {
+      if (!sb) {
+        showToast('Aguardando config...', 'error');
+        const ok = await initSupabase();
+        if (!ok) return;
+      }
+
+      const pendentes = selectedFiles.filter(s => s.status === 'pending');
+      if (pendentes.length === 0) return;
+
+      document.getElementById('process-btn').disabled = true;
+
+      for (const item of pendentes) {
+        try {
+          // 1. Upload pro Supabase Storage
+          item.status = 'uploading';
+          renderFileList();
+
+          // Gera path único: timestamp_nomearquivo
+          const timestamp = Date.now();
+          const safeName = item.file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+          const storagePath = `${timestamp}_${safeName}`;
+
+          const { error: uploadError } = await sb.storage
+            .from(BUCKET)
+            .upload(storagePath, item.file, {
+              contentType: 'application/pdf',
+              upsert: false,
+            });
+
+          if (uploadError) {
+            throw new Error(`Upload: ${uploadError.message}`);
+          }
+
+          // 2. Chama a API pra processar
+          item.status = 'processing';
+          renderFileList();
+
+          const response = await fetch(API_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              storage_path: storagePath,
+              nome_arquivo: item.file.name,
+            }),
+          });
+
+          const data = await response.json();
+
+          if (!response.ok) {
+            throw new Error(data.error || 'Erro no servidor');
+          }
+
+          item.status = 'success';
+          item.result = data;
+        } catch (err) {
+          item.status = 'error';
+          item.result = { error: err.message };
+          showToast(`${item.file.name}: ${err.message}`, 'error');
+        }
+
+        renderFileList();
+      }
+
+      // Após processar tudo, recarrega o histórico completo do banco
+      // (garante que tudo aparece sem duplicar)
+      allPortarias = [];
+      await carregarHistorico();
+      showToast('Processamento concluído', 'success');
+    });
+
+    function renderResults() {
+      if (allPortarias.length === 0) return;
+
+      const section = document.getElementById('results');
+      section.classList.add('active');
+
+      const stats = {};
+      allPortarias.forEach(p => {
+        stats[p.tipo_acao] = (stats[p.tipo_acao] || 0) + 1;
+      });
+
+      const tipoLabels = {
+        mudanca_logradouro: 'Mudança Logradouro',
+        cessacao: 'Cessação',
+        autorizacao: 'Autorização',
+        mudanca_mantenedora: 'Mudança Mantenedora',
+        mudanca_predio: 'Mudança Prédio',
+        outros: 'Outros',
+      };
+
+      const statsGrid = document.getElementById('stats-grid');
+      statsGrid.innerHTML = `
+        <div class="stat-card accent">
+          <p class="stat-label">Total</p>
+          <p class="stat-value accent">${allPortarias.length}</p>
+        </div>
+        ${Object.entries(stats).map(([tipo, count]) => `
+          <div class="stat-card">
+            <p class="stat-label">${tipoLabels[tipo] || tipo}</p>
+            <p class="stat-value">${count}</p>
+          </div>
+        `).join('')}
+      `;
+
+      const list = document.getElementById('portarias-list');
+      list.innerHTML = allPortarias.map((p, idx) => `
+        <article class="portaria-card" data-tipo="${p.tipo_acao}" data-expanded="false" id="portaria-${idx}">
+          <div class="portaria-header">
+            <span class="portaria-numero">Portaria ${p.numero_completo}</span>
+            <span class="portaria-tipo">${tipoLabels[p.tipo_acao] || p.tipo_acao}</span>
+          </div>
+          ${p.escola_nome ? `<p class="portaria-escola">${p.escola_nome}</p>` : ''}
+          <div class="portaria-meta">
+            ${p.data_diario ? `<div class="meta-item"><span class="meta-label">Data do Diário</span><span class="meta-value">${formatarData(p.data_diario)}</span></div>` : ''}
+            ${p.municipio ? `<div class="meta-item"><span class="meta-label">Município</span><span class="meta-value">${p.municipio}</span></div>` : ''}
+            ${p.sre ? `<div class="meta-item"><span class="meta-label">SRE</span><span class="meta-value">${p.sre}</span></div>` : ''}
+            ${p.escola_etapa ? `<div class="meta-item"><span class="meta-label">Etapa</span><span class="meta-value">${p.escola_etapa}</span></div>` : ''}
+            ${p.arquivo ? `<div class="meta-item"><span class="meta-label">Arquivo</span><span class="meta-value">${p.arquivo}</span></div>` : ''}
+          </div>
+          ${p.texto_completo ? `
+            <button class="portaria-toggle" onclick="togglePortaria(${idx})">
+              <span class="caret">▶</span>
+              <span class="toggle-label">Ver texto completo</span>
+            </button>
+            <pre class="portaria-texto">${escapeHtml(p.texto_completo)}</pre>
+          ` : ''}
+        </article>
+      `).join('');
+    }
+
+    function togglePortaria(idx) {
+      const card = document.getElementById(`portaria-${idx}`);
+      if (!card) return;
+      const isExpanded = card.getAttribute('data-expanded') === 'true';
+      card.setAttribute('data-expanded', String(!isExpanded));
+      const label = card.querySelector('.toggle-label');
+      if (label) label.textContent = isExpanded ? 'Ver texto completo' : 'Ocultar texto completo';
+    }
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    function formatarData(iso) {
+      // Recebe "2022-01-20" e retorna "20/01/2022"
+      if (!iso) return '';
+      const partes = String(iso).split('-');
+      if (partes.length !== 3) return iso;
+      return `${partes[2]}/${partes[1]}/${partes[0]}`;
+    }
+
+    function showToast(msg, type = 'success') {
+      const toast = document.getElementById('toast');
+      toast.textContent = msg;
+      toast.className = `toast show ${type}`;
+      setTimeout(() => toast.classList.remove('show'), 3500);
+    }
+
+    // Inicializa ao carregar: config + histórico do banco
+    (async () => {
+      await initSupabase();
+      await carregarHistorico();
+    })();
+  </script>
+</body>
+</html>
