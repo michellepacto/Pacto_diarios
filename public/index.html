@@ -893,7 +893,31 @@
       </div>
 
       <div class="escolas-list" id="escolas-list-identificadas"></div>
-      <div class="escolas-list" id="escolas-list-verificar" style="display: none;"></div>
+      <div id="escolas-verificar-wrapper" style="display: none;">
+        <div id="ia-controls" style="margin-bottom: 24px; padding: 20px; background: var(--cream); border: 1px solid var(--rule); display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap;">
+          <div style="font-family: 'Inter', sans-serif; font-size: 14px; color: var(--ink); flex: 1; min-width: 200px;">
+            <strong style="display: block; margin-bottom: 4px; font-family: 'Fraunces', serif; font-size: 16px;">Buscar nomes com IA</strong>
+            <span style="color: var(--muted);">Usa Claude AI para identificar o nome da escola nas portarias listadas abaixo. Processa uma por vez.</span>
+          </div>
+          <button class="btn-primary" id="btn-buscar-ia" onclick="buscarNomesComIA()" style="white-space: nowrap;">
+            Iniciar busca
+          </button>
+        </div>
+        <div id="ia-progresso" style="display: none; margin-bottom: 24px; padding: 16px 20px; background: var(--paper); border: 1px solid var(--accent);">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+            <span style="font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);">
+              <strong id="ia-status">Analisando...</strong>
+              <span id="ia-contador" style="color: var(--muted); margin-left: 8px;">0 / 0</span>
+            </span>
+            <button onclick="pararBuscaIA()" id="btn-parar-ia" style="background: none; border: 1px solid var(--rule); padding: 4px 12px; font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer; color: var(--muted);">Pausar</button>
+          </div>
+          <div style="height: 6px; background: var(--rule); border-radius: 999px; overflow: hidden;">
+            <div id="ia-barra" style="height: 100%; background: var(--accent); width: 0%; transition: width 0.3s;"></div>
+          </div>
+          <div id="ia-log" style="margin-top: 12px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); max-height: 100px; overflow-y: auto;"></div>
+        </div>
+        <div class="escolas-list" id="escolas-list-verificar"></div>
+      </div>
     </div><!-- /view-escolas -->
 
 
@@ -1266,8 +1290,8 @@
       document.querySelector(`.sub-tab[data-subtab="${nome}"]`).classList.add('active');
       document.getElementById('escolas-list-identificadas').style.display =
         nome === 'identificadas' ? 'flex' : 'none';
-      document.getElementById('escolas-list-verificar').style.display =
-        nome === 'verificar' ? 'flex' : 'none';
+      document.getElementById('escolas-verificar-wrapper').style.display =
+        nome === 'verificar' ? 'block' : 'none';
     }
 
     // === RENDERIZAÇÃO DE ESCOLAS ===
@@ -1416,7 +1440,119 @@
       if (caret) caret.style.transform = visivel ? '' : 'rotate(90deg)';
     }
 
-    // Inicializa ao carregar: config + histórico do banco
+    // === BUSCA DE NOMES COM IA ===
+    let buscaIAAtiva = false;
+
+    async function buscarNomesComIA() {
+      const btnIniciar = document.getElementById('btn-buscar-ia');
+      const progresso = document.getElementById('ia-progresso');
+      const status = document.getElementById('ia-status');
+      const contador = document.getElementById('ia-contador');
+      const barra = document.getElementById('ia-barra');
+      const log = document.getElementById('ia-log');
+
+      btnIniciar.disabled = true;
+      btnIniciar.textContent = 'Buscando...';
+      progresso.style.display = 'block';
+      log.innerHTML = '';
+      status.textContent = 'Carregando lista de portarias...';
+
+      try {
+        // 1. Buscar IDs das portarias sem nome
+        const respLista = await fetch('/api/listar_sem_nome');
+        if (!respLista.ok) throw new Error('Falha ao listar portarias');
+        const dadosLista = await respLista.json();
+        const portarias = dadosLista.portarias || [];
+
+        if (portarias.length === 0) {
+          status.textContent = 'Nada para analisar! ✓';
+          showToast('Nenhuma portaria precisa de análise', 'success');
+          btnIniciar.disabled = false;
+          btnIniciar.textContent = 'Iniciar busca';
+          return;
+        }
+
+        // 2. Processar uma por uma
+        buscaIAAtiva = true;
+        let processadas = 0;
+        let erros = 0;
+        const total = portarias.length;
+
+        for (const p of portarias) {
+          if (!buscaIAAtiva) {
+            status.textContent = `Pausado em ${processadas}/${total}`;
+            break;
+          }
+
+          status.textContent = `Analisando ${p.numero_completo || p.id}...`;
+          contador.textContent = `${processadas} / ${total}`;
+          barra.style.width = `${(processadas / total) * 100}%`;
+
+          try {
+            const resp = await fetch('/api/analisar', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ id: p.id }),
+            });
+            const data = await resp.json();
+
+            if (resp.ok) {
+              processadas++;
+              const nome = data.escola_nome_ia || '(sem escola)';
+              log.innerHTML = `<div style="color: var(--ink);">✓ ${p.numero_completo || p.id}: ${escapeHtml(nome)}</div>` + log.innerHTML;
+              // Atualizar a portaria local também
+              const local = allPortarias.find(x => x.id === p.id);
+              if (local) {
+                local.escola_nome_ia = data.escola_nome_ia;
+                local.resumo_ia = data.resumo_ia;
+                local.prazo_ia = data.prazo_ia;
+                local.observacoes_ia = data.observacoes_ia;
+                // Se IA encontrou nome, mover para "identificadas"
+                if (data.escola_nome_ia) {
+                  local.escola_nome = data.escola_nome_ia;
+                }
+              }
+            } else {
+              erros++;
+              log.innerHTML = `<div style="color: var(--accent);">✗ ${p.numero_completo || p.id}: ${escapeHtml(data.erro || 'erro')}</div>` + log.innerHTML;
+              // Se for erro de configuração, parar tudo
+              if (data.erro && data.erro.includes('ANTHROPIC_API_KEY')) {
+                showToast('API key do Claude não configurada no Vercel', 'error');
+                break;
+              }
+            }
+          } catch (e) {
+            erros++;
+            log.innerHTML = `<div style="color: var(--accent);">✗ ${p.numero_completo || p.id}: ${e.message}</div>` + log.innerHTML;
+          }
+
+          // Pequena pausa pra não sobrecarregar
+          await new Promise(r => setTimeout(r, 300));
+        }
+
+        // Final
+        contador.textContent = `${processadas} / ${total}`;
+        barra.style.width = `${(processadas / total) * 100}%`;
+        status.textContent = `Concluído: ${processadas} analisadas` + (erros > 0 ? ` (${erros} erros)` : '');
+
+        showToast(`${processadas} portarias analisadas pela IA`, 'success');
+
+        // Re-renderizar a aba de escolas com os novos dados
+        renderEscolas();
+
+      } catch (e) {
+        showToast('Erro: ' + e.message, 'error');
+      } finally {
+        buscaIAAtiva = false;
+        btnIniciar.disabled = false;
+        btnIniciar.textContent = 'Iniciar busca';
+      }
+    }
+
+    function pararBuscaIA() {
+      buscaIAAtiva = false;
+    }
+
     (async () => {
       await initSupabase();
       await carregarHistorico();
