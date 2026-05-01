@@ -831,6 +831,9 @@
       <button class="tab" data-tab="escolas" onclick="trocarAba('escolas')">
         Escolas <span class="tab-count" id="tab-count-escolas">0</span>
       </button>
+      <button class="tab" data-tab="buscar" onclick="trocarAba('buscar')">
+        Buscar
+      </button>
     </nav>
 
     <!-- View: Extração -->
@@ -944,6 +947,53 @@
         <div class="escolas-list" id="escolas-list-verificar"></div>
       </div>
     </div><!-- /view-escolas -->
+
+    <!-- View: Buscar -->
+    <div class="view" id="view-buscar">
+      <h2 class="view-title">Buscar escolas</h2>
+      <p class="view-subtitle">Filtre por curso, etapa, escola, município e situação</p>
+
+      <div style="margin-top: 24px; padding: 24px; background: var(--cream); border: 1px solid var(--rule);">
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 12px; font-weight: 600; color: var(--ink); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em;">Curso</label>
+            <input type="text" id="busca-curso" placeholder="ex: Radiologia, Enfermagem..." style="width: 100%; padding: 10px 12px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 14px; color: var(--ink);">
+          </div>
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 12px; font-weight: 600; color: var(--ink); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em;">Etapa de Ensino</label>
+            <input type="text" id="busca-etapa" placeholder="ex: Ensino Médio, EJA..." style="width: 100%; padding: 10px 12px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 14px; color: var(--ink);">
+          </div>
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 12px; font-weight: 600; color: var(--ink); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em;">Escola</label>
+            <input type="text" id="busca-escola" placeholder="Nome da escola" style="width: 100%; padding: 10px 12px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 14px; color: var(--ink);">
+          </div>
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 12px; font-weight: 600; color: var(--ink); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em;">Município</label>
+            <input type="text" id="busca-municipio" placeholder="Nome do município" style="width: 100%; padding: 10px 12px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 14px; color: var(--ink);">
+          </div>
+          <div style="grid-column: 1 / -1;">
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 12px; font-weight: 600; color: var(--ink); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em;">Situação</label>
+            <select id="busca-situacao" style="width: 100%; padding: 10px 12px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 14px; color: var(--ink);">
+              <option value="todas">Todas</option>
+              <option value="ativo">Ativos (vigência em dia)</option>
+              <option value="vencido">Vencidos</option>
+              <option value="cessado">Cessados / Encerrados</option>
+              <option value="sem_vencimento">Sem data de vencimento</option>
+            </select>
+          </div>
+        </div>
+        <div style="display: flex; gap: 8px; margin-top: 18px; flex-wrap: wrap;">
+          <button class="btn-primary" onclick="executarBusca()" style="white-space: nowrap;">Buscar</button>
+          <button onclick="limparBusca()" style="background: none; border: 1px solid var(--rule); padding: 10px 18px; font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 500; cursor: pointer; color: var(--ink);">Limpar filtros</button>
+        </div>
+      </div>
+
+      <!-- Resumo de resultados -->
+      <div id="busca-resumo" style="margin-top: 24px; display: none; padding: 14px 16px; background: var(--paper); border: 1px solid var(--rule); font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--muted);"></div>
+
+      <!-- Resultados -->
+      <div id="busca-resultados" style="margin-top: 16px;"></div>
+    </div><!-- /view-buscar -->
 
 
     <footer class="footer">
@@ -1653,12 +1703,169 @@
       }
     }
 
+    // === BUSCA ===
+    async function executarBusca() {
+      const filtros = {
+        curso:     document.getElementById('busca-curso').value.trim(),
+        etapa:     document.getElementById('busca-etapa').value.trim(),
+        escola:    document.getElementById('busca-escola').value.trim(),
+        municipio: document.getElementById('busca-municipio').value.trim(),
+        situacao:  document.getElementById('busca-situacao').value,
+      };
+
+      const resumo = document.getElementById('busca-resumo');
+      const resultados = document.getElementById('busca-resultados');
+
+      resumo.style.display = 'block';
+      resumo.textContent = 'Buscando...';
+      resultados.innerHTML = '';
+
+      try {
+        const r = await fetch(`${SUPABASE_FN}/buscar`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(filtros),
+        });
+        const data = await r.json();
+
+        if (!r.ok) {
+          resumo.textContent = 'Erro: ' + (data.erro || 'desconhecido');
+          resumo.style.color = 'var(--accent)';
+          return;
+        }
+
+        const escolas = data.escolas || [];
+
+        if (escolas.length === 0) {
+          resumo.textContent = '✗ Nenhum resultado encontrado para os filtros aplicados';
+          resumo.style.color = 'var(--muted)';
+          return;
+        }
+
+        resumo.style.color = 'var(--ink)';
+        resumo.innerHTML = `<strong>${escolas.length}</strong> escola${escolas.length>1?'s':''} encontrada${escolas.length>1?'s':''} · <strong>${data.total_cursos}</strong> curso${data.total_cursos!==1?'s':''} · <strong>${data.total_etapas}</strong> etapa${data.total_etapas!==1?'s':''}`;
+
+        resultados.innerHTML = escolas.map(e => renderEscolaResultado(e)).join('');
+
+      } catch (e) {
+        resumo.textContent = 'Erro: ' + e.message;
+        resumo.style.color = 'var(--accent)';
+      }
+    }
+
+    function limparBusca() {
+      document.getElementById('busca-curso').value = '';
+      document.getElementById('busca-etapa').value = '';
+      document.getElementById('busca-escola').value = '';
+      document.getElementById('busca-municipio').value = '';
+      document.getElementById('busca-situacao').value = 'todas';
+      document.getElementById('busca-resumo').style.display = 'none';
+      document.getElementById('busca-resultados').innerHTML = '';
+    }
+
+    function corSituacao(situacao) {
+      if (situacao === 'ativo') return '#1f7a3f';
+      if (situacao === 'vencido') return 'var(--accent)';
+      if (situacao === 'cessado') return 'var(--muted)';
+      return 'var(--ink)';
+    }
+
+    function rotuloSituacao(s, dias) {
+      if (s === 'ativo') {
+        if (dias != null && dias <= 90) return `Ativo · vence em ${dias} dia${dias!==1?'s':''}`;
+        return 'Ativo';
+      }
+      if (s === 'vencido') return 'Vencido';
+      if (s === 'cessado') return 'Cessado';
+      if (s === 'sem_vencimento') return 'Sem vencimento';
+      return s;
+    }
+
+    function renderEscolaResultado(e) {
+      const linhasCursos = (e.cursos || []).map(c => `
+        <tr style="border-bottom: 1px solid var(--rule);">
+          <td style="padding: 8px 12px; font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);"><strong>${escapeHtml(c.nome)}</strong>${c.qualificacoes ? `<div style="font-size: 11px; color: var(--muted); margin-top: 2px;">${escapeHtml(c.qualificacoes)}</div>` : ''}</td>
+          <td style="padding: 8px 12px; font-family: 'Inter', sans-serif; font-size: 12px; color: var(--muted); white-space: nowrap;">${escapeHtml(c.ato_descricao || '—')}</td>
+          <td style="padding: 8px 12px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--muted); white-space: nowrap;">${c.data_vencimento ? formatarData(c.data_vencimento) : '—'}</td>
+          <td style="padding: 8px 12px; font-family: 'Inter', sans-serif; font-size: 12px; color: ${corSituacao(c.situacao)}; font-weight: 600; white-space: nowrap;">${rotuloSituacao(c.situacao, c.dias_para_vencer)}</td>
+          <td style="padding: 8px 12px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); white-space: nowrap;">${c.portaria_numero || '—'}</td>
+        </tr>
+      `).join('');
+
+      const linhasEtapas = (e.etapas || []).map(et => `
+        <tr style="border-bottom: 1px solid var(--rule);">
+          <td style="padding: 8px 12px; font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);"><strong>${escapeHtml(et.etapa)}</strong></td>
+          <td style="padding: 8px 12px; font-family: 'Inter', sans-serif; font-size: 12px; color: var(--muted); white-space: nowrap;">${escapeHtml(et.ato_descricao || '—')}</td>
+          <td style="padding: 8px 12px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--muted); white-space: nowrap;">${et.data_vencimento ? formatarData(et.data_vencimento) : '—'}</td>
+          <td style="padding: 8px 12px; font-family: 'Inter', sans-serif; font-size: 12px; color: ${corSituacao(et.situacao)}; font-weight: 600; white-space: nowrap;">${rotuloSituacao(et.situacao, et.dias_para_vencer)}</td>
+          <td style="padding: 8px 12px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); white-space: nowrap;">${et.portaria_numero || '—'}</td>
+        </tr>
+      `).join('');
+
+      return `
+        <div style="margin-bottom: 24px; padding: 18px 22px; background: var(--paper); border: 1px solid var(--rule);">
+          <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 14px;">
+            <div>
+              <h3 style="font-family: 'Fraunces', serif; font-size: 19px; color: var(--ink); margin: 0 0 4px 0;">${escapeHtml(e.nome)}</h3>
+              <div style="font-family: 'Inter', sans-serif; font-size: 12px; color: var(--muted);">
+                ${e.municipio ? `${escapeHtml(e.municipio)}` : ''}${e.municipio && e.sre ? ' · ' : ''}${e.sre ? `SRE ${escapeHtml(e.sre)}` : ''}
+              </div>
+            </div>
+            <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); text-align: right;">
+              ${(e.cursos||[]).length} curso${(e.cursos||[]).length!==1?'s':''} · ${(e.etapas||[]).length} etapa${(e.etapas||[]).length!==1?'s':''}
+            </div>
+          </div>
+
+          ${linhasCursos ? `
+            <div style="margin-top: 12px;">
+              <div style="font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px;">Cursos</div>
+              <table style="width: 100%; border-collapse: collapse;">
+                <thead>
+                  <tr style="background: var(--cream);">
+                    <th style="text-align: left; padding: 6px 12px; font-family: 'Inter', sans-serif; font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Nome</th>
+                    <th style="text-align: left; padding: 6px 12px; font-family: 'Inter', sans-serif; font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Ato</th>
+                    <th style="text-align: left; padding: 6px 12px; font-family: 'Inter', sans-serif; font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Vencimento</th>
+                    <th style="text-align: left; padding: 6px 12px; font-family: 'Inter', sans-serif; font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Situação</th>
+                    <th style="text-align: left; padding: 6px 12px; font-family: 'Inter', sans-serif; font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Portaria</th>
+                  </tr>
+                </thead>
+                <tbody>${linhasCursos}</tbody>
+              </table>
+            </div>
+          ` : ''}
+
+          ${linhasEtapas ? `
+            <div style="margin-top: 16px;">
+              <div style="font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px;">Etapas de Ensino</div>
+              <table style="width: 100%; border-collapse: collapse;">
+                <thead>
+                  <tr style="background: var(--cream);">
+                    <th style="text-align: left; padding: 6px 12px; font-family: 'Inter', sans-serif; font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Etapa</th>
+                    <th style="text-align: left; padding: 6px 12px; font-family: 'Inter', sans-serif; font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Ato</th>
+                    <th style="text-align: left; padding: 6px 12px; font-family: 'Inter', sans-serif; font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Vencimento</th>
+                    <th style="text-align: left; padding: 6px 12px; font-family: 'Inter', sans-serif; font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Situação</th>
+                    <th style="text-align: left; padding: 6px 12px; font-family: 'Inter', sans-serif; font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Portaria</th>
+                  </tr>
+                </thead>
+                <tbody>${linhasEtapas}</tbody>
+              </table>
+            </div>
+          ` : ''}
+        </div>
+      `;
+    }
+
     function pararBuscaIA() { /* não necessário com job server-side */ }
 
     (async () => {
       await initSupabase();
       await carregarHistorico();
       await atualizarProgressoIA();
+      // Enter dispara busca em qualquer input da busca
+      ['busca-curso', 'busca-etapa', 'busca-escola', 'busca-municipio'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('keypress', (ev) => { if (ev.key === 'Enter') executarBusca(); });
+      });
       // Atualiza progresso automaticamente a cada 30s enquanto a aba Escolas estiver aberta
       setInterval(async () => {
         const abaEscolas = document.getElementById('view-escolas');
