@@ -99,6 +99,232 @@
 
     .upload-section { margin-bottom: 32px; }
 
+    /* === Menu de Abas === */
+    .tabs {
+      display: flex;
+      gap: 0;
+      margin: 32px 0 40px;
+      border-bottom: 1px solid var(--rule);
+      position: relative;
+    }
+    .tab {
+      background: none;
+      border: none;
+      padding: 14px 28px;
+      font-family: 'Fraunces', serif;
+      font-size: 18px;
+      font-weight: 500;
+      color: var(--muted);
+      cursor: pointer;
+      position: relative;
+      transition: color 0.2s;
+      letter-spacing: 0.01em;
+    }
+    .tab:hover {
+      color: var(--ink);
+    }
+    .tab.active {
+      color: var(--accent);
+    }
+    .tab.active::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: -1px;
+      height: 2px;
+      background: var(--accent);
+    }
+    .tab-count {
+      display: inline-block;
+      margin-left: 8px;
+      background: var(--rule);
+      color: var(--muted);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      vertical-align: middle;
+      letter-spacing: 0;
+    }
+    .tab.active .tab-count {
+      background: var(--accent);
+      color: var(--paper);
+    }
+
+    /* === Views (mostra/esconde) === */
+    .view {
+      display: none;
+    }
+    .view.active {
+      display: block;
+    }
+
+    /* === Sub-tabs (dentro de Escolas) === */
+    .sub-tabs {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .sub-tab {
+      background: none;
+      border: 1px solid var(--rule);
+      padding: 8px 16px;
+      font-family: 'Inter', sans-serif;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--muted);
+      cursor: pointer;
+      border-radius: 999px;
+      transition: all 0.2s;
+    }
+    .sub-tab:hover {
+      color: var(--ink);
+      border-color: var(--ink);
+    }
+    .sub-tab.active {
+      background: var(--ink);
+      color: var(--paper);
+      border-color: var(--ink);
+    }
+
+    /* === Cards de Escola === */
+    .escolas-list {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .escola-card {
+      background: var(--paper);
+      border: 1px solid var(--rule);
+      border-left: 3px solid var(--gold);
+      padding: 20px 24px;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .escola-card:hover {
+      border-color: var(--ink);
+      box-shadow: 0 2px 12px rgba(0,0,0,0.04);
+    }
+    .escola-card[data-verificar="true"] {
+      border-left-color: var(--amber);
+    }
+    .escola-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      margin-bottom: 8px;
+    }
+    .escola-nome {
+      font-family: 'Fraunces', serif;
+      font-size: 18px;
+      font-weight: 500;
+      color: var(--ink);
+      line-height: 1.3;
+      flex: 1;
+    }
+    .escola-nome em {
+      color: var(--muted);
+      font-style: italic;
+      font-weight: 400;
+    }
+    .escola-badge {
+      background: var(--accent);
+      color: var(--paper);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 999px;
+      white-space: nowrap;
+      letter-spacing: 0.02em;
+    }
+    .escola-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px 24px;
+      margin-bottom: 12px;
+      font-family: 'Inter', sans-serif;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .escola-meta-item strong {
+      color: var(--ink);
+      font-weight: 500;
+    }
+    .escola-toggle {
+      background: none;
+      border: none;
+      color: var(--accent);
+      font-family: 'Inter', sans-serif;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      padding: 4px 0;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 4px;
+    }
+    .escola-toggle:hover { text-decoration: underline; }
+    .escola-toggle .caret {
+      transition: transform 0.2s;
+      display: inline-block;
+      font-size: 10px;
+    }
+    .escola-card[data-expanded="true"] .escola-toggle .caret {
+      transform: rotate(90deg);
+    }
+    .escola-portarias {
+      max-height: 0;
+      overflow: hidden;
+      transition: max-height 0.3s ease;
+      margin-top: 0;
+    }
+    .escola-card[data-expanded="true"] .escola-portarias {
+      max-height: 8000px;
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px dashed var(--rule);
+    }
+    .escola-portaria-item {
+      padding: 10px 0;
+      border-bottom: 1px dotted var(--rule);
+      font-family: 'Inter', sans-serif;
+      font-size: 13px;
+    }
+    .escola-portaria-item:last-child { border-bottom: none; }
+    .escola-portaria-numero {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--accent);
+      margin-right: 10px;
+    }
+    .escola-portaria-tipo {
+      display: inline-block;
+      font-size: 11px;
+      padding: 2px 8px;
+      background: var(--cream);
+      border-radius: 999px;
+      color: var(--muted);
+      margin-right: 10px;
+    }
+    .escola-portaria-data {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .escola-empty {
+      text-align: center;
+      padding: 60px 20px;
+      color: var(--muted);
+      font-family: 'Fraunces', serif;
+      font-size: 16px;
+      font-style: italic;
+    }
+
     .section-label {
       font-family: 'JetBrains Mono', monospace;
       font-size: 11px;
@@ -597,6 +823,18 @@
       <p class="masthead-sub">Assessoria de Inspeção Escolar — Diário Oficial</p>
     </header>
 
+    <!-- Menu de Abas -->
+    <nav class="tabs">
+      <button class="tab active" data-tab="extracao" onclick="trocarAba('extracao')">
+        Extração
+      </button>
+      <button class="tab" data-tab="escolas" onclick="trocarAba('escolas')">
+        Escolas <span class="tab-count" id="tab-count-escolas">0</span>
+      </button>
+    </nav>
+
+    <!-- View: Extração -->
+    <div class="view active" id="view-extracao">
     <section class="upload-section">
       <p class="section-label">Inserir Documentos</p>
 
@@ -636,6 +874,28 @@
 
       <div class="portarias-list" id="portarias-list"></div>
     </section>
+    </div><!-- /view-extracao -->
+
+    <!-- View: Escolas -->
+    <div class="view" id="view-escolas">
+      <div class="results-header">
+        <h2 class="results-title">Escolas</h2>
+        <p class="results-subtitle">Portarias agrupadas por estabelecimento</p>
+      </div>
+
+      <div class="sub-tabs">
+        <button class="sub-tab active" data-subtab="identificadas" onclick="trocarSubAba('identificadas')">
+          Identificadas <span id="sub-count-identificadas">0</span>
+        </button>
+        <button class="sub-tab" data-subtab="verificar" onclick="trocarSubAba('verificar')">
+          Verificar <span id="sub-count-verificar">0</span>
+        </button>
+      </div>
+
+      <div class="escolas-list" id="escolas-list-identificadas"></div>
+      <div class="escolas-list" id="escolas-list-verificar" style="display: none;"></div>
+    </div><!-- /view-escolas -->
+
 
     <footer class="footer">
       Pacto Educacional · Sistema de Extração de Portarias · 2026
@@ -950,6 +1210,9 @@
           ` : ''}
         </article>
       `).join('');
+
+      // Atualiza também a view de Escolas (contadores e listas)
+      renderEscolas();
     }
 
     function togglePortaria(idx) {
@@ -984,6 +1247,154 @@
       toast.textContent = msg;
       toast.className = `toast show ${type}`;
       setTimeout(() => toast.classList.remove('show'), 3500);
+    }
+
+    // === MENU DE ABAS ===
+    function trocarAba(nome) {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+      document.querySelector(`.tab[data-tab="${nome}"]`).classList.add('active');
+      document.getElementById(`view-${nome}`).classList.add('active');
+      // Se for Escolas, garantir que está renderizado
+      if (nome === 'escolas') {
+        renderEscolas();
+      }
+    }
+
+    function trocarSubAba(nome) {
+      document.querySelectorAll('.sub-tab').forEach(t => t.classList.remove('active'));
+      document.querySelector(`.sub-tab[data-subtab="${nome}"]`).classList.add('active');
+      document.getElementById('escolas-list-identificadas').style.display =
+        nome === 'identificadas' ? 'flex' : 'none';
+      document.getElementById('escolas-list-verificar').style.display =
+        nome === 'verificar' ? 'flex' : 'none';
+    }
+
+    // === RENDERIZAÇÃO DE ESCOLAS ===
+    function renderEscolas() {
+      // Agrupar portarias por escola_nome (normalizado: trim + lowercase)
+      const grupos = {};      // chave: nome normalizado → {nome_display, portarias[], sre, municipio}
+      const verificar = [];   // portarias sem escola_nome
+
+      for (const p of allPortarias) {
+        const nome = (p.escola_nome || '').trim();
+        if (!nome) {
+          verificar.push(p);
+          continue;
+        }
+        const chave = nome.toLowerCase();
+        if (!grupos[chave]) {
+          grupos[chave] = {
+            nome_display: nome,
+            portarias: [],
+            sres: new Set(),
+            municipios: new Set(),
+            etapas: new Set(),
+          };
+        }
+        grupos[chave].portarias.push(p);
+        if (p.sre) grupos[chave].sres.add(p.sre);
+        if (p.municipio) grupos[chave].municipios.add(p.municipio);
+        if (p.escola_etapa) grupos[chave].etapas.add(p.escola_etapa);
+      }
+
+      // Ordenar escolas por nome
+      const listaEscolas = Object.values(grupos).sort((a, b) =>
+        a.nome_display.localeCompare(b.nome_display, 'pt-BR')
+      );
+
+      // Atualizar contadores
+      const totalEscolas = listaEscolas.length + (verificar.length > 0 ? 1 : 0);
+      document.getElementById('tab-count-escolas').textContent = totalEscolas;
+      document.getElementById('sub-count-identificadas').textContent = listaEscolas.length;
+      document.getElementById('sub-count-verificar').textContent = verificar.length;
+
+      // === Lista IDENTIFICADAS ===
+      const elIdent = document.getElementById('escolas-list-identificadas');
+      if (listaEscolas.length === 0) {
+        elIdent.innerHTML = '<div class="escola-empty">Nenhuma escola identificada ainda. Processe um diário na aba Extração.</div>';
+      } else {
+        elIdent.innerHTML = listaEscolas.map((g, idx) => renderEscolaCard(g, `ident-${idx}`)).join('');
+      }
+
+      // === Lista VERIFICAR ===
+      const elVerif = document.getElementById('escolas-list-verificar');
+      if (verificar.length === 0) {
+        elVerif.innerHTML = '<div class="escola-empty">Nenhuma portaria pendente de verificação. ✓</div>';
+      } else {
+        // Agrupar "verificar" como um único bloco com todas as portarias
+        const grupoVerif = {
+          nome_display: 'Sem nome de escola identificado',
+          portarias: verificar,
+          sres: new Set(verificar.map(p => p.sre).filter(Boolean)),
+          municipios: new Set(verificar.map(p => p.municipio).filter(Boolean)),
+          etapas: new Set(),
+          verificar: true,
+        };
+        elVerif.innerHTML = renderEscolaCard(grupoVerif, 'verif-0');
+      }
+    }
+
+    function renderEscolaCard(g, cardId) {
+      const tipoLabels = {
+        mudanca_logradouro: 'Mudança Logradouro',
+        cessacao: 'Cessação',
+        autorizacao: 'Autorização',
+        mudanca_mantenedora: 'Mudança Mantenedora',
+        mudanca_predio: 'Mudança Prédio',
+        outros: 'Outros',
+      };
+
+      const sresList = Array.from(g.sres).join(', ');
+      const munList = Array.from(g.municipios).join(', ');
+      const etapasList = Array.from(g.etapas).join(', ');
+      const qtd = g.portarias.length;
+
+      const verificarAttr = g.verificar ? 'data-verificar="true"' : '';
+      const nomeDisplay = g.verificar
+        ? `<em>${escapeHtml(g.nome_display)}</em>`
+        : escapeHtml(g.nome_display);
+
+      // Listar portarias dessa escola
+      const portariasHtml = g.portarias
+        .slice()
+        .sort((a, b) => (b.data_diario || '').localeCompare(a.data_diario || ''))
+        .map(p => `
+          <div class="escola-portaria-item">
+            <span class="escola-portaria-numero">${escapeHtml(p.numero_completo || '?')}</span>
+            <span class="escola-portaria-tipo">${tipoLabels[p.tipo_acao] || p.tipo_acao || '?'}</span>
+            <span class="escola-portaria-data">${formatarData(p.data_diario) || '—'}</span>
+            ${p.municipio ? `<div style="margin-top:4px;color:var(--muted);font-size:12px;">${escapeHtml(p.municipio)}${p.sre ? ' · ' + escapeHtml(p.sre) : ''}</div>` : ''}
+          </div>
+        `).join('');
+
+      return `
+        <article class="escola-card" id="escola-${cardId}" data-expanded="false" ${verificarAttr}>
+          <div class="escola-header">
+            <h3 class="escola-nome">${nomeDisplay}</h3>
+            <span class="escola-badge">${qtd} ${qtd === 1 ? 'portaria' : 'portarias'}</span>
+          </div>
+          <div class="escola-meta">
+            ${sresList ? `<div class="escola-meta-item"><strong>SRE:</strong> ${escapeHtml(sresList)}</div>` : ''}
+            ${munList ? `<div class="escola-meta-item"><strong>Município:</strong> ${escapeHtml(munList)}</div>` : ''}
+            ${etapasList ? `<div class="escola-meta-item"><strong>Etapa:</strong> ${escapeHtml(etapasList)}</div>` : ''}
+          </div>
+          <button class="escola-toggle" onclick="toggleEscola('${cardId}')">
+            <span class="caret">▶</span>
+            <span>Ver portarias (${qtd})</span>
+          </button>
+          <div class="escola-portarias">
+            ${portariasHtml}
+          </div>
+        </article>
+      `;
+    }
+
+    function toggleEscola(cardId) {
+      const card = document.getElementById(`escola-${cardId}`);
+      if (!card) return;
+      const isExpanded = card.getAttribute('data-expanded') === 'true';
+      card.setAttribute('data-expanded', String(!isExpanded));
     }
 
     // Inicializa ao carregar: config + histórico do banco
