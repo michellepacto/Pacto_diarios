@@ -1,9 +1,9 @@
 """
-Vercel Serverless Function - Processa um PDF do Diário Oficial de MG
-e insere portarias da Assessoria de Inspeção Escolar no Supabase.
+Vercel Serverless Function - Processa PDF do Supabase Storage
+e insere portarias da Assessoria de Inspeção Escolar no banco.
 
 Endpoint: POST /api/processar
-Recebe:   FormData com campo 'pdf' (file)
+Recebe:   JSON com {"storage_path": "diarios/arquivo.pdf"}
 Retorna:  JSON com lista de portarias extraídas/inseridas
 """
 
@@ -19,16 +19,11 @@ import fitz  # PyMuPDF
 from supabase import create_client
 
 
-# ============================================================
-# Configuração via env vars (configure no painel do Vercel)
-# ============================================================
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
+BUCKET_NAME = "diarios"
 
 
-# ============================================================
-# CONSTANTES DE EXTRAÇÃO
-# ============================================================
 MARCADOR_INICIO = "ASSESSORIA DE INSPEÇÃO ESCOLAR"
 
 MARCADORES_FIM = [
@@ -45,12 +40,7 @@ MARCADORES_FIM = [
 ]
 
 
-# ============================================================
-# FUNÇÕES DE EXTRAÇÃO
-# ============================================================
-
 def extrair_texto_pdf(caminho_pdf: str) -> tuple:
-    """Extrai texto do PDF usando PyMuPDF."""
     texto_completo = ""
     paginas = {}
     doc = fitz.open(caminho_pdf)
@@ -130,7 +120,6 @@ def extrair_enderecos(texto: str) -> tuple:
 
 def detectar_tipo_acao(texto: str) -> str:
     txt = texto.lower()
-
     if "ficam revogados os atos de autorização" in txt:
         return "cessacao"
     if re.search(r'ltda[\w\s\-–\.]+para[\w\s\-–\.]+ltda', txt, re.IGNORECASE):
@@ -154,7 +143,6 @@ def detectar_tipo_acao(texto: str) -> str:
         if n_a and n_a == n_n and b_a == b_n:
             return "mudanca_logradouro"
         return "mudanca_predio"
-
     return "outros"
 
 
@@ -237,21 +225,18 @@ def extrair_data_diario(nome_arquivo: str, texto_pdf: str) -> Optional[date]:
         'maio': 5, 'junho': 6, 'julho': 7, 'agosto': 8,
         'setembro': 9, 'outubro': 10, 'novembro': 11, 'dezembro': 12,
     }
-
     match = re.search(r'(\d{4})[-_]?(\d{2})[-_]?(\d{2})', nome_arquivo)
     if match:
         try:
             return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
         except ValueError:
             pass
-
     match = re.search(r'(\d{2})[-_](\d{2})[-_](\d{4})', nome_arquivo)
     if match:
         try:
             return date(int(match.group(3)), int(match.group(2)), int(match.group(1)))
         except ValueError:
             pass
-
     match = re.search(
         r'(?:SEGUNDA|TER[ÇC]A|QUARTA|QUINTA|SEXTA|S[ÁA]BADO|DOMINGO)[\s\-]*FEIRA?,?\s*(\d{1,2})\s+DE\s+(\w+)\s+DE\s+(\d{4})',
         texto_pdf, re.IGNORECASE
@@ -263,7 +248,6 @@ def extrair_data_diario(nome_arquivo: str, texto_pdf: str) -> Optional[date]:
                 return date(int(match.group(3)), mes, int(match.group(1)))
         except (ValueError, KeyError):
             pass
-
     match = re.search(
         r'(\d{1,2})\s+DE\s+(janeiro|fevereiro|mar[çc]o|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)\s+DE\s+(\d{4})',
         texto_pdf[:10000], re.IGNORECASE
@@ -275,18 +259,15 @@ def extrair_data_diario(nome_arquivo: str, texto_pdf: str) -> Optional[date]:
                 return date(int(match.group(3)), mes, int(match.group(1)))
         except (ValueError, KeyError):
             pass
-
     return None
 
 
 def parsear_portaria(portaria: dict, nome_arquivo: str, pagina, data_diario) -> dict:
     texto_original = portaria["texto"]
     texto_norm = normalizar_texto(texto_original)
-
     nome_escola, etapa, modalidade = extrair_escola(texto_norm)
     end_ant, end_novo = extrair_enderecos(texto_norm)
     mant_ant, mant_nova = extrair_mantenedoras(texto_norm)
-
     return {
         "numero_portaria": portaria["numero"],
         "ano": portaria["ano"],
@@ -309,54 +290,6 @@ def parsear_portaria(portaria: dict, nome_arquivo: str, pagina, data_diario) -> 
     }
 
 
-# ============================================================
-# HANDLER VERCEL
-# ============================================================
-
-def parse_multipart(body: bytes, content_type: str) -> dict:
-    """Parser multipart/form-data simples (sem dependências extras)."""
-    boundary_match = re.search(r'boundary=([^;]+)', content_type)
-    if not boundary_match:
-        raise ValueError("Boundary não encontrada no Content-Type")
-    
-    boundary = boundary_match.group(1).strip().strip('"')
-    boundary_bytes = f"--{boundary}".encode()
-    
-    parts = body.split(boundary_bytes)
-    fields = {}
-    
-    for part in parts:
-        if not part or part == b"--\r\n" or part == b"--":
-            continue
-        
-        # Separa headers do conteúdo (\r\n\r\n)
-        if b"\r\n\r\n" not in part:
-            continue
-        
-        headers_raw, content = part.split(b"\r\n\r\n", 1)
-        # Remove o \r\n final de cada parte
-        if content.endswith(b"\r\n"):
-            content = content[:-2]
-        
-        headers_str = headers_raw.decode("utf-8", errors="ignore")
-        name_match = re.search(r'name="([^"]+)"', headers_str)
-        if not name_match:
-            continue
-        
-        field_name = name_match.group(1)
-        filename_match = re.search(r'filename="([^"]+)"', headers_str)
-        
-        if filename_match:
-            fields[field_name] = {
-                "filename": filename_match.group(1),
-                "content": content,
-            }
-        else:
-            fields[field_name] = content.decode("utf-8", errors="ignore")
-    
-    return fields
-
-
 class handler(BaseHTTPRequestHandler):
     def _cors_headers(self):
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -377,33 +310,40 @@ class handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         try:
-            # Validações iniciais
             if not SUPABASE_URL or not SUPABASE_KEY:
                 return self._json_response(500, {
                     "error": "SUPABASE_URL e SUPABASE_SERVICE_KEY não configuradas"
                 })
 
-            content_type = self.headers.get("Content-Type", "")
-            if not content_type.startswith("multipart/form-data"):
-                return self._json_response(400, {"error": "Esperado multipart/form-data"})
-
             content_length = int(self.headers.get("Content-Length", 0))
             if content_length == 0:
                 return self._json_response(400, {"error": "Body vazio"})
 
-            # Lê o body
             body = self.rfile.read(content_length)
-            fields = parse_multipart(body, content_type)
+            try:
+                payload = json.loads(body)
+            except json.JSONDecodeError:
+                return self._json_response(400, {"error": "JSON inválido"})
 
-            if "pdf" not in fields or not isinstance(fields["pdf"], dict):
-                return self._json_response(400, {"error": "Campo 'pdf' não encontrado"})
+            storage_path = payload.get("storage_path")
+            nome_arquivo = payload.get("nome_arquivo", storage_path)
 
-            pdf_data = fields["pdf"]["content"]
-            nome_arquivo = fields["pdf"]["filename"]
+            if not storage_path:
+                return self._json_response(400, {"error": "storage_path é obrigatório"})
+
+            # Conecta no Supabase e baixa o arquivo do Storage
+            supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+
+            try:
+                pdf_bytes = supabase.storage.from_(BUCKET_NAME).download(storage_path)
+            except Exception as e:
+                return self._json_response(500, {
+                    "error": f"Erro ao baixar do Storage: {str(e)[:200]}"
+                })
 
             # Salva temp file (PyMuPDF precisa de path)
             with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                tmp.write(pdf_data)
+                tmp.write(pdf_bytes)
                 tmp_path = tmp.name
 
             try:
@@ -430,12 +370,9 @@ class handler(BaseHTTPRequestHandler):
             portarias_brutas = quebrar_em_portarias(texto_secao)
             portarias = [parsear_portaria(p, nome_arquivo, pagina_secao, data_diario) for p in portarias_brutas]
 
-            # Insere no Supabase
-            supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
             inseridas = 0
             duplicadas = 0
             erros = []
-
             for p in portarias:
                 try:
                     supabase.table("portarias_inspecao").insert(p).execute()
