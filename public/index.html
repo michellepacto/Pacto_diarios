@@ -677,6 +677,23 @@
       }
     }
 
+    async function carregarHistorico() {
+      try {
+        const res = await fetch('/api/listar');
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        if (data.portarias && data.portarias.length > 0) {
+          allPortarias = data.portarias;
+          renderResults();
+          showToast(`${data.portarias.length} portarias carregadas do histórico`, 'success');
+        }
+      } catch (err) {
+        console.warn('Não foi possível carregar histórico:', err.message);
+      }
+    }
+
     // Data atual
     const meses = ['JAN', 'FEV', 'MAR', 'ABR', 'MAI', 'JUN', 'JUL', 'AGO', 'SET', 'OUT', 'NOV', 'DEZ'];
     const hoje = new Date();
@@ -859,13 +876,6 @@
 
           item.status = 'success';
           item.result = data;
-
-          if (data.portarias && data.portarias.length > 0) {
-            allPortarias.push(...data.portarias.map(p => ({
-              ...p,
-              arquivo: item.file.name,
-            })));
-          }
         } catch (err) {
           item.status = 'error';
           item.result = { error: err.message };
@@ -875,7 +885,10 @@
         renderFileList();
       }
 
-      renderResults();
+      // Após processar tudo, recarrega o histórico completo do banco
+      // (garante que tudo aparece sem duplicar)
+      allPortarias = [];
+      await carregarHistorico();
       showToast('Processamento concluído', 'success');
     });
 
@@ -964,8 +977,11 @@
       setTimeout(() => toast.classList.remove('show'), 3500);
     }
 
-    // Inicializa ao carregar
-    initSupabase();
+    // Inicializa ao carregar: config + histórico do banco
+    (async () => {
+      await initSupabase();
+      await carregarHistorico();
+    })();
   </script>
 </body>
 </html>
