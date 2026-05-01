@@ -135,63 +135,150 @@ def normalizar_texto(texto: str) -> str:
 
 
 def quebrar_em_portarias(texto_secao: str) -> list:
-    """Identifica portarias da Assessoria/Superintendência de Inspeção Escolar.
+    """Identifica portarias/atos da seção de Inspeção/Regulação Escolar.
     
-    Estratégia: encontra todas as 'PORTARIA SEE N.º X/AAAA' (ou 'PORTARIA N.º') 
-    no texto e filtra pelas que têm o padrão característico de portarias 
-    de inspeção escolar (PROCESSO N.º + Resolução SEE/artigo 13 + termina com SRE –).
+    Suporta os 3 formatos identificados ao longo dos anos:
     
-    Isso é necessário porque o PyMuPDF extrai texto de PDFs em colunas em ordem
-    espacial, então portarias podem aparecer em ordem diferente da visual e
-    podem estar separadas dos cabeçalhos da seção.
+    1. PORTARIA N.º X/AAAA  (2021)
+    2. PORTARIA SEE N.º X/AAAA  (2023, 2025)
+    3. Atos sem número explícito (2020, 2022) — começam com 
+       "Nos termos do artigo 12/13 da Resolução SEE..." e terminam com "SRE – nome"
+    
+    Estratégia: localiza âncoras pelo INÍCIO DOS ATOS — seja "PORTARIA N.º" ou
+    "Nos termos do artigo X da Resolução SEE" — e captura cada bloco até a próxima 
+    âncora. Filtra por sinais característicos (Resolução SEE + termina com SRE –) 
+    para descartar texto de outras seções.
+    
+    Atos sem número recebem identificadores sequenciais "S/N-NNN/AAAA" baseados
+    na ordem de aparição no documento.
     """
-    padrao = r'PORTARIA(?:\s+SEE)?\s+N[\.\s]*[ºoº°]?\s*(\d+)\s*/\s*(\d{4})'
-    matches = list(re.finditer(padrao, texto_secao, re.IGNORECASE))
+    # Âncoras de início de bloco — qualquer uma dessas marca um novo ato
+    padrao_portaria = r'PORTARIA(?:\s+SEE)?\s+N[\.\s]*[ºoº°]?\s*(\d+)\s*/\s*(\d{4})'
+    padrao_nos_termos = r'Nos\s+termos\s+do\s+artigo\s+1[23]\s+da\s+Resolu[çc][ãa]o\s+SEE'
+    
+    # Coletar TODAS as âncoras (com tipo) e ordenar por posição
+    ancoras = []
+    
+    for m in re.finditer(padrao_portaria, texto_secao, re.IGNORECASE):
+        ancoras.append({
+            "pos": m.start(),
+            "tipo": "portaria",
+            "numero": m.group(1),
+            "ano": m.group(2),
+        })
+    
+    for m in re.finditer(padrao_nos_termos, texto_secao, re.IGNORECASE):
+        ancoras.append({
+            "pos": m.start(),
+            "tipo": "ato",
+            "numero": None,
+            "ano": None,
+        })
+    
+    # Ordenar por posição
+    ancoras.sort(key=lambda a: a["pos"])
+    
+    # Remover âncoras "ato" que estão DENTRO de uma portaria já identificada
+    # (uma portaria começa com "PORTARIA N.º X" e DEPOIS tem "Nos termos do artigo...")
+    ancoras_finais = []
+    for i, a in enumerate(ancoras):
+        if a["tipo"] == "ato":
+            # Se houver uma "portaria" muito próxima ANTES (até 300 chars),
+            # esse "Nos termos" é parte da portaria, não um novo ato.
+            tem_portaria_antes = any(
+                p["tipo"] == "portaria" and 0 < a["pos"] - p["pos"] < 300
+                for p in ancoras_finais[-3:]  # olha as últimas 3 ancoras
+            )
+            if tem_portaria_antes:
+                continue
+        ancoras_finais.append(a)
     
     portarias = []
-    vistos = set()  # Para deduplicar
+    vistos = set()
+    contador_sn = {}  # ano → contador de atos sem número
     
-    for i, match in enumerate(matches):
-        numero = match.group(1)
-        ano = match.group(2)
-        chave = f"{numero}/{ano}"
+    for i, ancora in enumerate(ancoras_finais):
+        inicio = ancora["pos"]
+        fim = ancoras_finais[i + 1]["pos"] if i + 1 < len(ancoras_finais) else len(texto_secao)
         
-        if chave in vistos:
-            continue
-        
-        inicio = match.start()
-        fim = matches[i + 1].start() if i + 1 < len(matches) else len(texto_secao)
-        
-        # Limita o tamanho de uma portaria para 5000 chars (evita capturar lixo)
         if fim - inicio > 5000:
             fim = inicio + 5000
         
         texto_portaria = texto_secao[inicio:fim].strip()
         
-        # FILTRO: portarias de inspeção escolar têm:
-        #   1. "PROCESSO N." nos próximos 300 chars
-        #   2. Mencionam "Resolução SEE" ou "artigo 13"
-        #   3. Terminam com "SRE –" ou "SRE -"
-        cabecalho = texto_portaria[:400]
-        tem_processo = bool(re.search(r'PROCESSO\s+N[\.\s]*[ºoº°]?', cabecalho, re.IGNORECASE))
-        tem_resolucao = bool(re.search(r'Resolu[çc][ãa]o\s+SEE|artigo\s+13|art\.?\s*13', cabecalho, re.IGNORECASE))
-        tem_sre = bool(re.search(r'SRE\s*[–\-]\s*\w+', texto_portaria))
+        # FILTRO: portarias/atos de inspeção escolar têm:
+        #   1. Mencionam "Resolução SEE" ou "artigo 12/13"
+        #   2. Terminam com "SRE –" (com travessão)
+        cabecalho = texto_portaria[:600]
+        tem_resolucao = bool(re.search(
+            r'Resolu[çc][ãa]o\s+SEE|artigo\s+1[23]|art\.?\s*1[23]',
+            cabecalho, re.IGNORECASE
+        ))
+        tem_sre = bool(re.search(r'SRE\s*[–\-]\s*\w', texto_portaria))
         
-        # Aceita se tiver pelo menos 2 dos 3 sinais
-        sinais = sum([tem_processo, tem_resolucao, tem_sre])
-        if sinais < 2:
+        # Para portarias COM número: também aceita se tiver "PROCESSO N." ou "SEI N."
+        # (essas formas são mais explícitas e existem desde 2023)
+        tem_processo_ou_sei = bool(re.search(
+            r'PROCESSO\s+N[\.\s]*[ºoº°]?|SEI\s+N[\.\s]*[ºoº°]?',
+            cabecalho, re.IGNORECASE
+        ))
+        
+        # Indicadores adicionais de regulação escolar — usados quando
+        # o ato não termina com "SRE –" (caso de atos de turmas em comunidades,
+        # como ocorre em 2022 com "vinculada à Escola Municipal X, em Y").
+        tem_indicadores_escolares = bool(re.search(
+            r'Escola\s+Municipal|Col[ée]gio\s+|Centro\s+Educacional|'
+            r'Ensino\s+Fundamental|Ensino\s+M[ée]dio|'
+            r'vinculada\s+[àa]\s+Escola|ministrad[oa]\s+pel[oa]\s+(?:Col[ée]gio|Escola)|'
+            r'situad[oa]\s+na\s+(?:R\.|Av\.|Rua|Avenida|Pra[çc]a)',
+            texto_portaria, re.IGNORECASE
+        ))
+        
+        if ancora["tipo"] == "portaria":
+            # Portarias com número: precisa de Resolução + (SRE OU Processo/SEI)
+            if not tem_resolucao or not (tem_sre or tem_processo_ou_sei):
+                continue
+            numero = ancora["numero"]
+            ano = ancora["ano"]
+            chave = f"{numero}/{ano}"
+            numero_int = int(numero)
+        else:
+            # Atos sem número: precisa de Resolução + (SRE OU indicadores escolares fortes)
+            # Atos de criação/funcionamento de turmas em comunidades raramente terminam
+            # com "SRE –", mas sempre mencionam "vinculada à Escola Municipal X" ou afins.
+            if not tem_resolucao:
+                continue
+            if not (tem_sre or tem_indicadores_escolares):
+                continue
+            
+            # Atos sem número não têm "ano oficial" próprio — são publicados no
+            # diário e o ano correto é o da publicação. Aqui usamos placeholder
+            # "0000" e a numeração sequencial é absoluta (não agrupada por ano);
+            # parsear_portaria substitui "0000" pelo ano de data_diario depois.
+            ano = "0000"
+            
+            contador_sn["_total"] = contador_sn.get("_total", 0) + 1
+            seq = contador_sn["_total"]
+            chave = f"S/N-{seq:03d}/{ano}"
+            numero_int = None  # banco aceita NULL agora
+        
+        if chave in vistos:
             continue
-        
         vistos.add(chave)
+        
         portarias.append({
             "numero_completo": chave,
-            "numero": int(numero),
+            "numero": numero_int,
             "ano": int(ano),
             "texto": texto_portaria,
         })
     
-    # Ordenar por número
-    portarias.sort(key=lambda p: (p["ano"], p["numero"]))
+    # Ordenar: primeiro portarias com número, depois sem número (S/N)
+    def chave_ordenacao(p):
+        eh_sem_numero = p["numero"] is None
+        return (p["ano"], eh_sem_numero, p["numero"] or 0)
+    
+    portarias.sort(key=chave_ordenacao)
     return portarias
 
 
@@ -360,10 +447,27 @@ def parsear_portaria(portaria: dict, nome_arquivo: str, pagina, data_diario) -> 
     nome_escola, etapa, modalidade = extrair_escola(texto_norm)
     end_ant, end_novo = extrair_enderecos(texto_norm)
     mant_ant, mant_nova = extrair_mantenedoras(texto_norm)
+    
+    # Para atos sem número (numero == None), o ano correto é sempre o do
+    # data_diario — atos sem número não têm "ano oficial" próprio. Para
+    # portarias com número (PORTARIA N.º X/AAAA), o ano vem do próprio número.
+    ano = portaria["ano"]
+    numero_completo = portaria["numero_completo"]
+    eh_sem_numero = portaria["numero"] is None
+    
+    if eh_sem_numero and data_diario:
+        ano = data_diario.year
+        # Substitui o placeholder "0000" pelo ano real do diário
+        numero_completo = numero_completo.replace("/0000", f"/{ano}")
+    elif ano == 0 and data_diario:
+        # Fallback geral
+        ano = data_diario.year
+        numero_completo = numero_completo.replace("/0000", f"/{ano}")
+    
     return {
         "numero_portaria": portaria["numero"],
-        "ano": portaria["ano"],
-        "numero_completo": portaria["numero_completo"],
+        "ano": ano,
+        "numero_completo": numero_completo,
         "tipo_acao": detectar_tipo_acao(texto_norm),
         "escola_nome": nome_escola,
         "escola_etapa": etapa,
