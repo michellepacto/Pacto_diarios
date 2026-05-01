@@ -41,7 +41,6 @@
       margin: 0 auto;
     }
 
-    /* CABEÇALHO ESTILO JORNAL */
     .masthead {
       border-top: 4px double var(--ink);
       border-bottom: 4px double var(--ink);
@@ -98,10 +97,7 @@
       letter-spacing: 0.02em;
     }
 
-    /* ÁREA DE UPLOAD */
-    .upload-section {
-      margin-bottom: 32px;
-    }
+    .upload-section { margin-bottom: 32px; }
 
     .section-label {
       font-family: 'JetBrains Mono', monospace;
@@ -130,8 +126,6 @@
       text-align: center;
       cursor: pointer;
       transition: all 0.25s ease;
-      position: relative;
-      overflow: hidden;
     }
 
     .dropzone:hover {
@@ -195,11 +189,8 @@
       box-shadow: var(--shadow);
     }
 
-    #file-input {
-      display: none;
-    }
+    #file-input { display: none; }
 
-    /* LISTA DE ARQUIVOS */
     .file-list {
       margin-top: 24px;
       display: flex;
@@ -219,6 +210,7 @@
       transition: all 0.2s ease;
     }
 
+    .file-item.uploading,
     .file-item.processing {
       border-color: var(--amber);
       background: rgba(201, 138, 46, 0.05);
@@ -246,10 +238,10 @@
       font-family: 'JetBrains Mono', monospace;
       font-size: 9px;
       font-weight: 600;
-      letter-spacing: 0.05em;
       flex-shrink: 0;
     }
 
+    .file-item.uploading .file-icon,
     .file-item.processing .file-icon {
       animation: pulse 1.5s ease infinite;
     }
@@ -259,9 +251,7 @@
       50% { opacity: 0.5; }
     }
 
-    .file-info {
-      min-width: 0;
-    }
+    .file-info { min-width: 0; }
 
     .file-name {
       font-family: 'Fraunces', serif;
@@ -277,7 +267,6 @@
       font-family: 'JetBrains Mono', monospace;
       font-size: 11px;
       color: var(--muted);
-      letter-spacing: 0.05em;
     }
 
     .file-status {
@@ -289,25 +278,11 @@
       border-radius: 2px;
     }
 
-    .file-status.pending {
-      color: var(--muted);
-      border: 1px solid var(--paper-dark);
-    }
-
-    .file-status.processing {
-      color: var(--amber);
-      border: 1px solid var(--amber);
-    }
-
-    .file-status.success {
-      color: var(--green);
-      border: 1px solid var(--green);
-    }
-
-    .file-status.error {
-      color: var(--accent);
-      border: 1px solid var(--accent);
-    }
+    .file-status.pending { color: var(--muted); border: 1px solid var(--paper-dark); }
+    .file-status.uploading { color: var(--amber); border: 1px solid var(--amber); }
+    .file-status.processing { color: var(--amber); border: 1px solid var(--amber); }
+    .file-status.success { color: var(--green); border: 1px solid var(--green); }
+    .file-status.error { color: var(--accent); border: 1px solid var(--accent); }
 
     .file-remove {
       background: none;
@@ -333,7 +308,6 @@
       cursor: not-allowed;
     }
 
-    /* ACTIONS */
     .actions {
       display: flex;
       justify-content: space-between;
@@ -381,15 +355,8 @@
       opacity: 0.5;
     }
 
-    /* RESULTADOS */
-    .results-section {
-      margin-top: 56px;
-      display: none;
-    }
-
-    .results-section.active {
-      display: block;
-    }
+    .results-section { margin-top: 56px; display: none; }
+    .results-section.active { display: block; }
 
     .results-header {
       border-top: 2px solid var(--ink);
@@ -449,16 +416,9 @@
       font-variation-settings: "opsz" 144;
     }
 
-    .stat-value.accent {
-      color: var(--accent);
-    }
+    .stat-value.accent { color: var(--accent); }
 
-    /* PORTARIAS */
-    .portarias-list {
-      display: flex;
-      flex-direction: column;
-      gap: 16px;
-    }
+    .portarias-list { display: flex; flex-direction: column; gap: 16px; }
 
     .portaria-card {
       background: rgba(255, 255, 255, 0.5);
@@ -514,11 +474,7 @@
       font-size: 0.85rem;
     }
 
-    .meta-item {
-      display: flex;
-      flex-direction: column;
-      gap: 2px;
-    }
+    .meta-item { display: flex; flex-direction: column; gap: 2px; }
 
     .meta-label {
       font-family: 'JetBrains Mono', monospace;
@@ -528,11 +484,8 @@
       color: var(--muted);
     }
 
-    .meta-value {
-      font-weight: 500;
-    }
+    .meta-value { font-weight: 500; }
 
-    /* TOAST */
     .toast {
       position: fixed;
       bottom: 24px;
@@ -550,14 +503,10 @@
       z-index: 100;
     }
 
-    .toast.show {
-      transform: translateY(0);
-    }
-
+    .toast.show { transform: translateY(0); }
     .toast.error { background: var(--accent); }
     .toast.success { background: var(--green); }
 
-    /* FOOTER */
     .footer {
       margin-top: 80px;
       padding-top: 24px;
@@ -570,13 +519,9 @@
       color: var(--muted);
     }
 
-    /* MOBILE */
     @media (max-width: 640px) {
       body { padding: 20px 12px; }
-      .file-item {
-        grid-template-columns: auto 1fr;
-        grid-template-rows: auto auto;
-      }
+      .file-item { grid-template-columns: auto 1fr; grid-template-rows: auto auto; }
       .file-status, .file-remove { grid-column: 2; justify-self: end; }
       .actions { flex-direction: column; gap: 16px; align-items: stretch; }
     }
@@ -605,7 +550,7 @@
           <path d="M22 22l10-10 10 10" />
         </svg>
         <p class="dropzone-title">Arraste os PDFs do diário aqui</p>
-        <p class="dropzone-hint">ou clique no botão para selecionar arquivos</p>
+        <p class="dropzone-hint">ou clique no botão para selecionar arquivos · até 50MB cada</p>
         <button class="dropzone-button" type="button" id="select-btn">
           Selecionar PDFs
         </button>
@@ -642,20 +587,46 @@
 
   <div class="toast" id="toast"></div>
 
+  <!-- Supabase JS Client (CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
   <script>
+    // ============================================================
+    // CONFIGURAÇÃO - obtida da API /api/config (env vars)
+    // ============================================================
+    const BUCKET = 'diarios';
     const API_ENDPOINT = '/api/processar';
     const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
+    // ============================================================
 
+    let sb = null; // será inicializado após buscar config
     let selectedFiles = [];
     let allPortarias = [];
 
-    // ----- Data atual no cabeçalho -----
+    // Inicializa o Supabase client buscando config da API
+    async function initSupabase() {
+      try {
+        const res = await fetch('/api/config');
+        const cfg = await res.json();
+        if (!cfg.supabase_url || !cfg.supabase_anon_key) {
+          throw new Error('Config incompleta: faltam env vars no Vercel');
+        }
+        const { createClient } = supabase;
+        sb = createClient(cfg.supabase_url, cfg.supabase_anon_key);
+        return true;
+      } catch (err) {
+        showToast(`Erro ao carregar config: ${err.message}`, 'error');
+        return false;
+      }
+    }
+
+    // Data atual
     const meses = ['JAN', 'FEV', 'MAR', 'ABR', 'MAI', 'JUN', 'JUL', 'AGO', 'SET', 'OUT', 'NOV', 'DEZ'];
     const hoje = new Date();
     document.getElementById('data-hoje').textContent =
       `${String(hoje.getDate()).padStart(2, '0')} ${meses[hoje.getMonth()]} ${hoje.getFullYear()}`;
 
-    // ----- Drag & Drop -----
+    // Drag & Drop
     const dropzone = document.getElementById('dropzone');
     const fileInput = document.getElementById('file-input');
     const selectBtn = document.getElementById('select-btn');
@@ -666,7 +637,6 @@
     });
 
     dropzone.addEventListener('click', () => fileInput.click());
-
     fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
 
     ['dragenter', 'dragover'].forEach(ev =>
@@ -685,11 +655,8 @@
       })
     );
 
-    dropzone.addEventListener('drop', (e) => {
-      handleFiles(e.dataTransfer.files);
-    });
+    dropzone.addEventListener('drop', (e) => handleFiles(e.dataTransfer.files));
 
-    // ----- Gestão de arquivos -----
     function handleFiles(files) {
       const novos = Array.from(files).filter(f => {
         if (f.type !== 'application/pdf' && !f.name.toLowerCase().endsWith('.pdf')) {
@@ -701,7 +668,7 @@
           return false;
         }
         if (selectedFiles.find(s => s.file.name === f.name && s.file.size === f.size)) {
-          return false; // já tem
+          return false;
         }
         return true;
       });
@@ -745,30 +712,31 @@
         div.className = `file-item ${item.status}`;
         div.dataset.id = item.id;
 
-        const sizeKB = (item.file.size / 1024).toFixed(0);
         const sizeMB = (item.file.size / (1024 * 1024)).toFixed(2);
-        const sizeStr = item.file.size > 1024 * 1024 ? `${sizeMB} MB` : `${sizeKB} KB`;
+        const sizeStr = `${sizeMB} MB`;
 
         const statusText = {
           pending: 'Aguardando',
+          uploading: 'Enviando',
           processing: 'Processando',
           success: `${item.result?.portarias_inseridas || 0} portarias`,
           error: 'Erro',
         }[item.status];
 
+        const isDisabled = item.status === 'uploading' || item.status === 'processing';
+
         div.innerHTML = `
           <div class="file-icon">PDF</div>
           <div class="file-info">
             <p class="file-name">${item.file.name}</p>
-            <p class="file-meta">${sizeStr}</p>
+            <p class="file-meta">${sizeStr}${item.result?.error ? ' · ' + item.result.error : ''}</p>
           </div>
           <span class="file-status ${item.status}">${statusText}</span>
-          <button class="file-remove" data-remove="${item.id}" ${item.status === 'processing' ? 'disabled' : ''}>×</button>
+          <button class="file-remove" data-remove="${item.id}" ${isDisabled ? 'disabled' : ''}>×</button>
         `;
         list.appendChild(div);
       });
 
-      // bind remove buttons
       list.querySelectorAll('[data-remove]').forEach(btn => {
         btn.addEventListener('click', () => {
           const id = btn.dataset.remove;
@@ -778,24 +746,52 @@
       });
     }
 
-    // ----- Processamento -----
+    // Processamento: upload pro Storage + chamada à API
     document.getElementById('process-btn').addEventListener('click', async () => {
+      if (!sb) {
+        showToast('Aguardando config...', 'error');
+        const ok = await initSupabase();
+        if (!ok) return;
+      }
+
       const pendentes = selectedFiles.filter(s => s.status === 'pending');
       if (pendentes.length === 0) return;
 
       document.getElementById('process-btn').disabled = true;
 
       for (const item of pendentes) {
-        item.status = 'processing';
-        renderFileList();
-
         try {
-          const formData = new FormData();
-          formData.append('pdf', item.file);
+          // 1. Upload pro Supabase Storage
+          item.status = 'uploading';
+          renderFileList();
+
+          // Gera path único: timestamp_nomearquivo
+          const timestamp = Date.now();
+          const safeName = item.file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+          const storagePath = `${timestamp}_${safeName}`;
+
+          const { error: uploadError } = await sb.storage
+            .from(BUCKET)
+            .upload(storagePath, item.file, {
+              contentType: 'application/pdf',
+              upsert: false,
+            });
+
+          if (uploadError) {
+            throw new Error(`Upload: ${uploadError.message}`);
+          }
+
+          // 2. Chama a API pra processar
+          item.status = 'processing';
+          renderFileList();
 
           const response = await fetch(API_ENDPOINT, {
             method: 'POST',
-            body: formData,
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              storage_path: storagePath,
+              nome_arquivo: item.file.name,
+            }),
           });
 
           const data = await response.json();
@@ -816,7 +812,7 @@
         } catch (err) {
           item.status = 'error';
           item.result = { error: err.message };
-          showToast(`Erro: ${err.message}`, 'error');
+          showToast(`${item.file.name}: ${err.message}`, 'error');
         }
 
         renderFileList();
@@ -826,14 +822,12 @@
       showToast('Processamento concluído', 'success');
     });
 
-    // ----- Resultados -----
     function renderResults() {
       if (allPortarias.length === 0) return;
 
       const section = document.getElementById('results');
       section.classList.add('active');
 
-      // Estatísticas
       const stats = {};
       allPortarias.forEach(p => {
         stats[p.tipo_acao] = (stats[p.tipo_acao] || 0) + 1;
@@ -862,7 +856,6 @@
         `).join('')}
       `;
 
-      // Lista de portarias
       const list = document.getElementById('portarias-list');
       list.innerHTML = allPortarias.map(p => `
         <article class="portaria-card" data-tipo="${p.tipo_acao}">
@@ -881,13 +874,15 @@
       `).join('');
     }
 
-    // ----- Toast -----
     function showToast(msg, type = 'success') {
       const toast = document.getElementById('toast');
       toast.textContent = msg;
       toast.className = `toast show ${type}`;
       setTimeout(() => toast.classList.remove('show'), 3500);
     }
+
+    // Inicializa ao carregar
+    initSupabase();
   </script>
 </body>
 </html>
