@@ -1,23 +1,18 @@
 {
-  "version": 2,
   "builds": [
-    {
-      "src": "api/*.py",
-      "use": "@vercel/python"
-    },
-    {
-      "src": "public/**",
-      "use": "@vercel/static"
-    }
+    { "src": "api/processar.py",       "use": "@vercel/python" },
+    { "src": "api/listar.py",           "use": "@vercel/python" },
+    { "src": "api/config.py",           "use": "@vercel/python" },
+    { "src": "api/analisar.py",         "use": "@vercel/python" },
+    { "src": "api/listar_sem_nome.py",  "use": "@vercel/python" },
+    { "src": "public/**",               "use": "@vercel/static" }
   ],
   "routes": [
-    {
-      "src": "/api/(.*)",
-      "dest": "api/$1.py"
-    },
-    {
-      "src": "/(.*)",
-      "dest": "public/$1"
-    }
+    { "src": "/api/processar",      "dest": "/api/processar.py" },
+    { "src": "/api/listar",         "dest": "/api/listar.py" },
+    { "src": "/api/config",         "dest": "/api/config.py" },
+    { "src": "/api/analisar",       "dest": "/api/analisar.py" },
+    { "src": "/api/listar_sem_nome","dest": "/api/listar_sem_nome.py" },
+    { "src": "/(.*)",               "dest": "/public/$1" }
   ]
 }
