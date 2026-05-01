@@ -484,6 +484,63 @@
       color: var(--muted);
     }
 
+    .portaria-toggle {
+      margin-top: 16px;
+      padding-top: 14px;
+      border-top: 1px dashed var(--paper-dark);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: none;
+      border-bottom: none;
+      border-left: none;
+      border-right: none;
+      cursor: pointer;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--muted);
+      padding-left: 0;
+      padding-right: 0;
+      transition: color 0.2s;
+      width: 100%;
+      justify-content: flex-start;
+    }
+
+    .portaria-toggle:hover { color: var(--accent); }
+
+    .portaria-toggle .caret {
+      display: inline-block;
+      transition: transform 0.2s;
+      font-size: 9px;
+    }
+
+    .portaria-card[data-expanded="true"] .portaria-toggle .caret {
+      transform: rotate(90deg);
+    }
+
+    .portaria-texto {
+      display: none;
+      margin-top: 14px;
+      padding: 16px 18px;
+      background: rgba(255, 252, 245, 0.65);
+      border: 1px solid var(--paper-dark);
+      border-radius: 2px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      line-height: 1.7;
+      color: var(--ink);
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      max-height: 420px;
+      overflow-y: auto;
+    }
+
+    .portaria-card[data-expanded="true"] .portaria-texto {
+      display: block;
+    }
+
     .meta-value { font-weight: 500; }
 
     .toast {
@@ -857,8 +914,8 @@
       `;
 
       const list = document.getElementById('portarias-list');
-      list.innerHTML = allPortarias.map(p => `
-        <article class="portaria-card" data-tipo="${p.tipo_acao}">
+      list.innerHTML = allPortarias.map((p, idx) => `
+        <article class="portaria-card" data-tipo="${p.tipo_acao}" data-expanded="false" id="portaria-${idx}">
           <div class="portaria-header">
             <span class="portaria-numero">Portaria ${p.numero_completo}</span>
             <span class="portaria-tipo">${tipoLabels[p.tipo_acao] || p.tipo_acao}</span>
@@ -870,8 +927,34 @@
             ${p.escola_etapa ? `<div class="meta-item"><span class="meta-label">Etapa</span><span class="meta-value">${p.escola_etapa}</span></div>` : ''}
             ${p.arquivo ? `<div class="meta-item"><span class="meta-label">Arquivo</span><span class="meta-value">${p.arquivo}</span></div>` : ''}
           </div>
+          ${p.texto_completo ? `
+            <button class="portaria-toggle" onclick="togglePortaria(${idx})">
+              <span class="caret">▶</span>
+              <span class="toggle-label">Ver texto completo</span>
+            </button>
+            <pre class="portaria-texto">${escapeHtml(p.texto_completo)}</pre>
+          ` : ''}
         </article>
       `).join('');
+    }
+
+    function togglePortaria(idx) {
+      const card = document.getElementById(`portaria-${idx}`);
+      if (!card) return;
+      const isExpanded = card.getAttribute('data-expanded') === 'true';
+      card.setAttribute('data-expanded', String(!isExpanded));
+      const label = card.querySelector('.toggle-label');
+      if (label) label.textContent = isExpanded ? 'Ver texto completo' : 'Ocultar texto completo';
+    }
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
     }
 
     function showToast(msg, type = 'success') {
