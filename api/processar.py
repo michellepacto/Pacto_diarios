@@ -89,15 +89,20 @@ MARCADORES_FIM = [
 def extrair_texto_pdf(caminho_pdf: str) -> tuple:
     texto_completo = ""
     paginas = {}
+    metadata_title = ""
     doc = fitz.open(caminho_pdf)
     try:
+        # Captura o título do metadata — esses Diários vêm com nome
+        # padronizado "Diário_do_Executivo_AAAA-MM-DD.pdf" embutido,
+        # mesmo se a usuária renomear o arquivo depois.
+        metadata_title = (doc.metadata or {}).get("title", "") or ""
         for i, pagina in enumerate(doc, start=1):
             txt = pagina.get_text() or ""
             paginas[i] = txt
             texto_completo += f"\n[PAGINA_{i}]\n" + txt
     finally:
         doc.close()
-    return texto_completo, paginas
+    return texto_completo, paginas, metadata_title
 
 
 def localizar_secao(texto_completo: str, paginas: dict) -> tuple:
@@ -398,12 +403,41 @@ def extrair_bases_legais(texto: str) -> list:
     return bases
 
 
-def extrair_data_diario(nome_arquivo: str, texto_pdf: str) -> Optional[date]:
+def extrair_data_diario(nome_arquivo: str, texto_pdf: str, metadata_title: str = "") -> Optional[date]:
+    """Extrai a data do Diário Oficial.
+    
+    Ordem de prioridade:
+    1. Metadata 'title' do PDF — Diários do INFOLEDBH vêm com nome padronizado
+       "Diário_do_Executivo_AAAA-MM-DD.pdf" embutido, MESMO se a usuária
+       renomear o arquivo. Esta é a fonte mais confiável.
+    2. Nome do arquivo — caso a usuária renomeie pra algo com data.
+    3. Texto do PDF — fallback final, busca padrões "DIA-FEIRA, DD DE MES DE AAAA"
+       ou "Belo Horizonte, DD de mês de AAAA". Pode ser impreciso, pois capas
+       de Diários geralmente têm o cabeçalho renderizado como imagem (não texto).
+    """
     meses = {
         'janeiro': 1, 'fevereiro': 2, 'março': 3, 'marco': 3, 'abril': 4,
         'maio': 5, 'junho': 6, 'julho': 7, 'agosto': 8,
         'setembro': 9, 'outubro': 10, 'novembro': 11, 'dezembro': 12,
     }
+    
+    # 1) Metadata title — formato "Diário_do_Executivo_AAAA-MM-DD.pdf"
+    if metadata_title:
+        match = re.search(r'(\d{4})[-_](\d{2})[-_](\d{2})', metadata_title)
+        if match:
+            try:
+                return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
+            except ValueError:
+                pass
+        # Tentar formato DD-MM-AAAA também no metadata
+        match = re.search(r'(\d{2})[-_](\d{2})[-_](\d{4})', metadata_title)
+        if match:
+            try:
+                return date(int(match.group(3)), int(match.group(2)), int(match.group(1)))
+            except ValueError:
+                pass
+    
+    # 2) Nome do arquivo
     match = re.search(r'(\d{4})[-_]?(\d{2})[-_]?(\d{2})', nome_arquivo)
     if match:
         try:
@@ -416,6 +450,8 @@ def extrair_data_diario(nome_arquivo: str, texto_pdf: str) -> Optional[date]:
             return date(int(match.group(3)), int(match.group(2)), int(match.group(1)))
         except ValueError:
             pass
+    
+    # 3) Texto do PDF — cabeçalho com dia da semana
     match = re.search(
         r'(?:SEGUNDA|TER[ÇC]A|QUARTA|QUINTA|SEXTA|S[ÁA]BADO|DOMINGO)[\s\-]*FEIRA?,?\s*(\d{1,2})\s+DE\s+(\w+)\s+DE\s+(\d{4})',
         texto_pdf, re.IGNORECASE
@@ -427,6 +463,7 @@ def extrair_data_diario(nome_arquivo: str, texto_pdf: str) -> Optional[date]:
                 return date(int(match.group(3)), mes, int(match.group(1)))
         except (ValueError, KeyError):
             pass
+    # 4) Texto do PDF — "Belo Horizonte, aos DD de mês de AAAA"
     match = re.search(
         r'(\d{1,2})\s+DE\s+(janeiro|fevereiro|mar[çc]o|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)\s+DE\s+(\d{4})',
         texto_pdf[:10000], re.IGNORECASE
@@ -543,14 +580,14 @@ class handler(BaseHTTPRequestHandler):
                 tmp_path = tmp.name
 
             try:
-                texto, paginas = extrair_texto_pdf(tmp_path)
+                texto, paginas, metadata_title = extrair_texto_pdf(tmp_path)
             finally:
                 try:
                     os.unlink(tmp_path)
                 except OSError:
                     pass
 
-            data_diario = extrair_data_diario(nome_arquivo, texto)
+            data_diario = extrair_data_diario(nome_arquivo, texto, metadata_title)
             texto_secao, pagina_secao = localizar_secao(texto, paginas)
 
             # texto_secao agora retorna o texto completo do PDF.
