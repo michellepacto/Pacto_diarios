@@ -158,8 +158,10 @@ def quebrar_em_portarias(texto_secao: str) -> list:
     na ordem de aparição no documento.
     """
     # Âncoras de início de bloco — qualquer uma dessas marca um novo ato
-    padrao_portaria = r'PORTARIA(?:\s+SEE)?\s+N[\.\s]*[ºoº°]?\s*(\d+)\s*/\s*(\d{4})'
-    padrao_nos_termos = r'Nos\s+termos\s+do\s+artigo\s+1[23]\s+da\s+Resolu[çc][ãa]o\s+SEE'
+    # Aceita variacoes: PORTARIA / PORTARIA SEE / PORTARIA SRE / PORTARIA SRE-UBERLANDIA etc.
+    padrao_portaria = r'PORTARIA(?:\s+SEE|\s+SRE(?:[\s\-–][A-ZÁÉÍÓÚÂÊÔÃÕÇa-záéíóúâêôãõç]+)*)?\s+N[\.\s]*[ºoº°°]?\s*(\d+)\s*/\s*(\d{4})'
+    # Aceita artigos 12, 13 (formatos antigos) e 16 (formato novo de 2026 das SREs locais)
+    padrao_nos_termos = r'Nos\s+termos\s+do\s+artigo\s+(?:1[236])\s+(?:da\s+|,\s*inciso)'
     
     # Coletar TODAS as âncoras (com tipo) e ordenar por posição
     ancoras = []
@@ -239,9 +241,11 @@ def quebrar_em_portarias(texto_secao: str) -> list:
         ]
         melhor_corte = None
         for padrao, modo in terminadores:
-            m = re.search(padrao, texto_portaria)
+            # Procura terminador APENAS apos os primeiros 250 chars
+            # Isso evita cortar titulos que tem "SRE -" no inicio (ex: PORTARIA SRE-UBERLANDIA)
+            m = re.search(padrao, texto_portaria[250:])
             if m:
-                pos_corte = m.end() if modo == 'incluir' else m.start()
+                pos_corte = (m.end() if modo == 'incluir' else m.start()) + 250
                 if melhor_corte is None or pos_corte < melhor_corte:
                     melhor_corte = pos_corte
         if melhor_corte is not None:
@@ -252,7 +256,7 @@ def quebrar_em_portarias(texto_secao: str) -> list:
         #   2. Terminam com "SRE –" (com travessão)
         cabecalho = texto_portaria[:600]
         tem_resolucao = bool(re.search(
-            r'Resolu[çc][ãa]o\s+SEE|artigo\s+1[23]|art\.?\s*1[23]',
+            r'Resolu[çc][ãa]o\s+SEE|artigo\s+1[236]|art\.?\s*1[236]',
             cabecalho, re.IGNORECASE
         ))
         tem_sre = bool(re.search(r'SRE\s*[–\-]\s*\w', texto_portaria))
@@ -269,15 +273,35 @@ def quebrar_em_portarias(texto_secao: str) -> list:
         # como ocorre em 2022 com "vinculada à Escola Municipal X, em Y").
         tem_indicadores_escolares = bool(re.search(
             r'Escola\s+Municipal|Col[ée]gio\s+|Centro\s+Educacional|'
+            r'Centro\s+de\s+Educa[çc][ãa]o|Educa[çc][ãa]o\s+Infantil|'
             r'Ensino\s+Fundamental|Ensino\s+M[ée]dio|'
             r'vinculada\s+[àa]\s+Escola|ministrad[oa]\s+pel[oa]\s+(?:Col[ée]gio|Escola)|'
-            r'situad[oa]\s+na\s+(?:R\.|Av\.|Rua|Avenida|Pra[çc]a)',
+            r'situad[oa]\s+(?:na|no|[àa])\s+(?:R\.|Av\.|Rua|Avenida|Pra[çc]a)|'
+            r'entidade\s+mantenedora|autoriza[çd][oãa]\w*\s+o\s+funcionamento',
             texto_portaria, re.IGNORECASE
         ))
         
+        # FILTRO ADICIONAL: rejeitar portarias administrativas que tem palavras escolares
+        # mas NAO sao de inspecao escolar (institucao, processos administrativos, etc)
+        eh_administrativa = bool(re.search(
+            r'Institui\s+e\s+nomeia|'
+            r'Comit[êe]\s+(?:Estadual|Intersetorial|Regional|de\s+Busca|Especial)|'
+            r'Comiss[ãa]o\s+de\s+Concilia[çc][ãa]o|'
+            r'Comiss[ãa]o\s+de\s+Processo\s+Administrativo|'
+            r'TERMO\s+DE\s+INSTAURA[ÇC][ÃA]O|'
+            r'Processo\s+Administrativo,\s+nos\s+termos\s+da\s+Lei\s+n[º°o\.]*\s*14\.184|'
+            r'compor[ãa]o\s+a\s+Comiss[ãa]o|'
+            r'instaurado\s+pela\s+Portaria',
+            cabecalho, re.IGNORECASE
+        ))
+        if eh_administrativa:
+            continue
+        
         if ancora["tipo"] == "portaria":
-            # Portarias com número: precisa de Resolução + (SRE OU Processo/SEI)
-            if not tem_resolucao or not (tem_sre or tem_processo_ou_sei):
+            # Portarias com número: precisa de Resolução + (SRE OU Processo/SEI OU indicadores escolares fortes)
+            # O criterio de indicadores e necessario para portarias das SREs locais (formato 2026)
+            # que tem "Resolucao SEE artigo 16" e mencionam escolas/colegios mas nao "SRE -" no fim
+            if not tem_resolucao or not (tem_sre or tem_processo_ou_sei or tem_indicadores_escolares):
                 continue
             numero = ancora["numero"]
             ano = ancora["ano"]
