@@ -825,7 +825,10 @@
 
     <!-- Menu de Abas -->
     <nav class="tabs">
-      <button class="tab active" data-tab="extracao" onclick="trocarAba('extracao')">
+      <button class="tab active" data-tab="painel" onclick="trocarAba('painel')">
+        Painel
+      </button>
+      <button class="tab" data-tab="extracao" onclick="trocarAba('extracao')">
         Extração
       </button>
       <button class="tab" data-tab="escolas" onclick="trocarAba('escolas')">
@@ -839,8 +842,105 @@
       </button>
     </nav>
 
+    <!-- View: Painel (TELA PRINCIPAL DE TRABALHO) -->
+    <div class="view active" id="view-painel">
+      <h2 class="view-title">Painel de Acompanhamento</h2>
+      <p class="view-subtitle">Status de vigência de cursos e etapas por escola</p>
+
+      <!-- Cards de resumo por status -->
+      <div id="painel-cards" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-top: 24px; margin-bottom: 24px;">
+        <div style="padding: 30px; text-align: center; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--muted); grid-column: 1 / -1;">Carregando...</div>
+      </div>
+
+      <!-- Painel de filtros -->
+      <div style="padding: 18px 20px; background: var(--cream); border: 1px solid var(--rule); margin-bottom: 20px;">
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 12px;">
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;">Status</label>
+            <select id="pn-status" onchange="painelBuscar()" style="width: 100%; padding: 8px 10px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);">
+              <option value="todos">Todos</option>
+              <option value="urgente_3_meses">⚡ URGENTE (3 meses)</option>
+              <option value="alerta_6_meses">⚠ Alerta (6 meses)</option>
+              <option value="atencao_10_meses">⚠ Atenção (10 meses)</option>
+              <option value="ativo">✓ Ativo</option>
+              <option value="vencido_recente">✗ Vencido (recente)</option>
+              <option value="vencido_mais_6_meses">✗ Vencido +6 meses</option>
+              <option value="vencido_mais_1_ano">✗ Vencido +1 ano</option>
+              <option value="cessado">○ Cessado</option>
+              <option value="sem_vencimento">– Sem vencimento</option>
+            </select>
+          </div>
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;">Tipo</label>
+            <select id="pn-tipo" onchange="painelBuscar()" style="width: 100%; padding: 8px 10px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);">
+              <option value="ambos">Cursos + Etapas</option>
+              <option value="cursos">Só Cursos</option>
+              <option value="etapas">Só Etapas</option>
+            </select>
+          </div>
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;">Escola</label>
+            <input type="text" id="pn-escola" placeholder="Nome da escola..." oninput="painelBuscarDebounced()" style="width: 100%; padding: 8px 10px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);">
+          </div>
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;">Município</label>
+            <input type="text" id="pn-municipio" placeholder="Cidade..." oninput="painelBuscarDebounced()" style="width: 100%; padding: 8px 10px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);">
+          </div>
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;">SRE</label>
+            <input type="text" id="pn-sre" placeholder="Superintendência..." oninput="painelBuscarDebounced()" style="width: 100%; padding: 8px 10px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);">
+          </div>
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;">Curso</label>
+            <input type="text" id="pn-curso" placeholder="Nome do curso..." oninput="painelBuscarDebounced()" style="width: 100%; padding: 8px 10px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);">
+          </div>
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;">Etapa</label>
+            <input type="text" id="pn-etapa" placeholder="Etapa de ensino..." oninput="painelBuscarDebounced()" style="width: 100%; padding: 8px 10px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);">
+          </div>
+        </div>
+
+        <!-- Filtro: Dependência Administrativa (multi-seleção) -->
+        <div style="margin-bottom: 14px;">
+          <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em;">Dependência Administrativa</label>
+          <div id="pn-dependencia-pills" style="display: flex; flex-wrap: wrap; gap: 6px;">
+            <button type="button" data-valor="" onclick="painelTogglePill('dependencia', this)" class="pn-pill pn-pill-todos pn-pill-ativo" style="padding: 5px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">Todos</button>
+            <button type="button" data-valor="ESTADUAL"  onclick="painelTogglePill('dependencia', this)" class="pn-pill" style="padding: 5px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">ESTADUAL</button>
+            <button type="button" data-valor="FEDERAL"   onclick="painelTogglePill('dependencia', this)" class="pn-pill" style="padding: 5px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">FEDERAL</button>
+            <button type="button" data-valor="MUNICIPAL" onclick="painelTogglePill('dependencia', this)" class="pn-pill" style="padding: 5px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">MUNICIPAL</button>
+            <button type="button" data-valor="PRIVADA"   onclick="painelTogglePill('dependencia', this)" class="pn-pill" style="padding: 5px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">PRIVADA</button>
+          </div>
+        </div>
+
+        <!-- Filtro: Nível de Ensino (multi-seleção) -->
+        <div style="margin-bottom: 14px;">
+          <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em;">Nível de Ensino</label>
+          <div id="pn-nivel-pills" style="display: flex; flex-wrap: wrap; gap: 6px;">
+            <button type="button" data-valor="" onclick="painelTogglePill('nivel', this)" class="pn-pill pn-pill-todos pn-pill-ativo" style="padding: 5px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">Todos</button>
+            <button type="button" data-valor="Educação Infantil"   onclick="painelTogglePill('nivel', this)" class="pn-pill" style="padding: 5px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">Educação Infantil</button>
+            <button type="button" data-valor="Ensino Fundamental"  onclick="painelTogglePill('nivel', this)" class="pn-pill" style="padding: 5px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">Ensino Fundamental</button>
+            <button type="button" data-valor="Ensino Médio"        onclick="painelTogglePill('nivel', this)" class="pn-pill" style="padding: 5px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">Ensino Médio</button>
+            <button type="button" data-valor="Nível Técnico"       onclick="painelTogglePill('nivel', this)" class="pn-pill" style="padding: 5px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">Nível Técnico</button>
+            <button type="button" data-valor="EJA"                 onclick="painelTogglePill('nivel', this)" class="pn-pill" style="padding: 5px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">EJA</button>
+            <button type="button" data-valor="Curso Inicial"       onclick="painelTogglePill('nivel', this)" class="pn-pill" style="padding: 5px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">Curso Inicial</button>
+            <button type="button" data-valor="Curso Intermediário" onclick="painelTogglePill('nivel', this)" class="pn-pill" style="padding: 5px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">Curso Intermediário</button>
+            <button type="button" data-valor="Outros"              onclick="painelTogglePill('nivel', this)" class="pn-pill" style="padding: 5px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">Outros</button>
+          </div>
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+          <div id="pn-resumo" style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted);">—</div>
+          <button onclick="painelLimparFiltros()" style="background: none; border: 1px solid var(--rule); padding: 6px 14px; font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer; color: var(--ink);">Limpar filtros</button>
+        </div>
+      </div>
+
+      <!-- Lista de escolas -->
+      <div id="pn-lista" style="display: flex; flex-direction: column; gap: 12px;"></div>
+
+      <div id="pn-status-msg" style="text-align: center; padding: 30px; color: var(--muted); font-family: 'Inter', sans-serif; font-size: 13px;"></div>
+    </div><!-- /view-painel -->
+
     <!-- View: Extração -->
-    <div class="view active" id="view-extracao">
+    <div class="view" id="view-extracao">
     <section class="upload-section">
       <p class="section-label">Inserir Documentos</p>
 
@@ -1578,6 +1678,11 @@
         renderEscolas();
         atualizarProgressoIA();
       }
+      // Se for Painel, carregar dados (só na primeira vez)
+      if (nome === 'painel' && !window._painelCarregado) {
+        window._painelCarregado = true;
+        painelBuscar();
+      }
     }
 
     function trocarSubAba(nome) {
@@ -2249,7 +2354,281 @@ ${(r.analise.exemplos_portarias || []).map(ex => `- ${ex.numero}: "${ex.primeira
           if (file) fnAnalisar(file);
         });
       }
+      // Como Painel é a aba ativa inicial, carregar dados dela já
+      window._painelCarregado = true;
+      if (typeof painelBuscar === 'function') {
+        setTimeout(painelBuscar, 100);
+      }
     });
+
+    // ========================================================================
+    // PAINEL DE ACOMPANHAMENTO (tela principal de trabalho)
+    // ========================================================================
+
+    // Configuração visual de cada status (ícone, rótulo, cor)
+    const PAINEL_STATUS_CFG = {
+      urgente_3_meses:      { icon: '⚡', label: 'URGENTE (3 meses)',     cor: '#C04F00', cor_bg: '#FBE9DC' },
+      vencido_mais_1_ano:   { icon: '✗', label: 'Vencido +1 ano',         cor: '#5A1A1A', cor_bg: '#F0DEDE' },
+      vencido_mais_6_meses: { icon: '✗', label: 'Vencido +6 meses',       cor: '#7B2D2D', cor_bg: '#F4E1E1' },
+      vencido_recente:      { icon: '✗', label: 'Vencido (recente)',      cor: '#A04141', cor_bg: '#F8E7E7' },
+      alerta_6_meses:       { icon: '⚠', label: 'Alerta (6 meses)',       cor: '#A06A00', cor_bg: '#FBF1DC' },
+      atencao_10_meses:     { icon: '⚠', label: 'Atenção (10 meses)',     cor: '#8C7026', cor_bg: '#F6EDD6' },
+      ativo:                { icon: '✓', label: 'Ativo',                  cor: '#1F7A3F', cor_bg: '#DEF1E5' },
+      cessado:              { icon: '○', label: 'Cessado',                cor: '#6E6E6E', cor_bg: '#ECECEC' },
+      sem_vencimento:       { icon: '–', label: 'Sem vencimento',         cor: '#8B8B8B', cor_bg: '#F0F0F0' },
+    };
+
+    // Ordem de exibição dos cards (urgente → ativo → cessado)
+    const PAINEL_STATUS_ORDEM = [
+      'urgente_3_meses', 'vencido_mais_1_ano', 'vencido_mais_6_meses', 'vencido_recente',
+      'alerta_6_meses', 'atencao_10_meses', 'ativo', 'sem_vencimento', 'cessado',
+    ];
+
+    let _painelDebounce = null;
+    function painelBuscarDebounced() {
+      clearTimeout(_painelDebounce);
+      _painelDebounce = setTimeout(painelBuscar, 400);
+    }
+
+    function painelLimparFiltros() {
+      document.getElementById('pn-status').value = 'todos';
+      document.getElementById('pn-tipo').value = 'ambos';
+      document.getElementById('pn-escola').value = '';
+      document.getElementById('pn-municipio').value = '';
+      document.getElementById('pn-sre').value = '';
+      document.getElementById('pn-curso').value = '';
+      document.getElementById('pn-etapa').value = '';
+      // Reset pílulas: ativa só "Todos"
+      ['dependencia', 'nivel'].forEach(grupo => {
+        const c = document.getElementById(`pn-${grupo}-pills`);
+        if (!c) return;
+        c.querySelectorAll('.pn-pill').forEach(p => {
+          if (p.classList.contains('pn-pill-todos')) painelAtivarPill(p);
+          else painelDesativarPill(p);
+        });
+      });
+      painelBuscar();
+    }
+
+    async function painelBuscar() {
+      const status    = document.getElementById('pn-status').value;
+      const tipo      = document.getElementById('pn-tipo').value;
+      const escola    = document.getElementById('pn-escola').value;
+      const municipio = document.getElementById('pn-municipio').value;
+      const sre       = document.getElementById('pn-sre').value;
+      const curso     = document.getElementById('pn-curso').value;
+      const etapa     = document.getElementById('pn-etapa').value;
+      const dependencia = painelObterValoresPills('dependencia');
+      const nivel       = painelObterValoresPills('nivel');
+
+      const statusMsg = document.getElementById('pn-status-msg');
+      statusMsg.textContent = 'Carregando dados...';
+      statusMsg.style.color = 'var(--muted)';
+
+      try {
+        const resp = await fetch(`${SUPABASE_FN}/painel-escolas`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status, tipo, escola, municipio, sre, curso, etapa, dependencia, nivel }),
+        });
+        const dados = await resp.json();
+        if (!resp.ok) throw new Error(dados.erro || 'Erro ao buscar');
+
+        renderPainelCards(dados.contadores || {}, status);
+        renderPainelLista(dados.escolas || [], dados.total_cursos, dados.total_etapas);
+
+        const resumo = document.getElementById('pn-resumo');
+        resumo.textContent = `${dados.total_escolas} escolas · ${dados.total_cursos} cursos · ${dados.total_etapas} etapas`;
+        statusMsg.textContent = '';
+      } catch (e) {
+        statusMsg.style.color = 'var(--accent)';
+        statusMsg.textContent = '✗ Erro: ' + e.message;
+      }
+    }
+
+    // Lê os valores ativos das pílulas (exclui "Todos")
+    function painelObterValoresPills(grupo) {
+      const container = document.getElementById(`pn-${grupo}-pills`);
+      if (!container) return [];
+      const ativos = container.querySelectorAll('.pn-pill-ativo:not(.pn-pill-todos)');
+      return Array.from(ativos).map(p => p.dataset.valor).filter(Boolean);
+    }
+
+    // Toggle de pílula multi-seleção
+    function painelTogglePill(grupo, btn) {
+      const container = document.getElementById(`pn-${grupo}-pills`);
+      const valor = btn.dataset.valor;
+      const isTodos = valor === '';
+
+      if (isTodos) {
+        // Clicou em "Todos" → desativa tudo e ativa só "Todos"
+        container.querySelectorAll('.pn-pill').forEach(p => painelDesativarPill(p));
+        painelAtivarPill(btn);
+      } else {
+        // Toggle do valor especifico
+        if (btn.classList.contains('pn-pill-ativo')) {
+          painelDesativarPill(btn);
+        } else {
+          painelAtivarPill(btn);
+        }
+        // Se nenhum especifico estiver ativo, ativa "Todos"; senao desativa "Todos"
+        const especificosAtivos = container.querySelectorAll('.pn-pill-ativo:not(.pn-pill-todos)').length;
+        const todosBtn = container.querySelector('.pn-pill-todos');
+        if (especificosAtivos === 0) {
+          painelAtivarPill(todosBtn);
+        } else {
+          painelDesativarPill(todosBtn);
+        }
+      }
+      painelBuscar();
+    }
+
+    function painelAtivarPill(p) {
+      p.classList.add('pn-pill-ativo');
+      p.style.background = 'var(--ink)';
+      p.style.color = 'var(--paper)';
+      p.style.borderColor = 'var(--ink)';
+    }
+
+    function painelDesativarPill(p) {
+      p.classList.remove('pn-pill-ativo');
+      p.style.background = 'var(--paper)';
+      p.style.color = 'var(--ink)';
+      p.style.borderColor = 'var(--rule)';
+    }
+
+    function renderPainelCards(contadores, statusSelecionado) {
+      const cards = document.getElementById('painel-cards');
+      const total = Object.values(contadores).reduce((a, b) => a + (b || 0), 0);
+
+      const cardTotal = `
+        <div onclick="painelFiltrarPorStatus('todos')" style="padding: 16px 18px; background: var(--ink); color: var(--paper); border: 1px solid var(--ink); cursor: pointer; transition: opacity 0.15s; ${statusSelecionado === 'todos' ? 'box-shadow: 0 0 0 3px var(--gold);' : ''}">
+          <div style="font-family: 'Inter', sans-serif; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; opacity: 0.8;">Total</div>
+          <div style="font-family: 'Fraunces', serif; font-size: 32px; line-height: 1.1; margin-top: 4px;">${total}</div>
+        </div>
+      `;
+
+      const outrosCards = PAINEL_STATUS_ORDEM
+        .filter(k => contadores[k] > 0 || statusSelecionado === k)
+        .map(k => {
+          const cfg = PAINEL_STATUS_CFG[k];
+          const qtd = contadores[k] || 0;
+          const ativo = statusSelecionado === k;
+          return `
+            <div onclick="painelFiltrarPorStatus('${k}')" style="padding: 16px 18px; background: ${cfg.cor_bg}; border: 1px solid ${cfg.cor}; cursor: pointer; transition: opacity 0.15s; ${ativo ? 'box-shadow: 0 0 0 3px var(--gold);' : ''}">
+              <div style="font-family: 'Inter', sans-serif; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: ${cfg.cor}; font-weight: 600;">${cfg.icon} ${cfg.label}</div>
+              <div style="font-family: 'Fraunces', serif; font-size: 32px; line-height: 1.1; margin-top: 4px; color: ${cfg.cor};">${qtd}</div>
+            </div>
+          `;
+        }).join('');
+
+      cards.innerHTML = cardTotal + outrosCards;
+    }
+
+    function painelFiltrarPorStatus(status) {
+      document.getElementById('pn-status').value = status;
+      painelBuscar();
+    }
+
+    function renderPainelLista(escolas, totalCursos, totalEtapas) {
+      const lista = document.getElementById('pn-lista');
+      if (!escolas || escolas.length === 0) {
+        lista.innerHTML = `<div style="text-align: center; padding: 60px 20px; color: var(--muted); font-family: 'Inter', sans-serif; font-size: 14px;">Nenhuma escola encontrada com os filtros aplicados.</div>`;
+        return;
+      }
+
+      lista.innerHTML = escolas.map((e, idx) => {
+        const totalItens = (e.cursos || []).length + (e.etapas || []).length;
+        const cursosHtml = (e.cursos || []).map(c => renderItemPainel(c, 'curso')).join('');
+        const etapasHtml = (e.etapas || []).map(et => renderItemPainel(et, 'etapa')).join('');
+
+        // Cores discretas por dependência
+        const corDep = {
+          ESTADUAL:  '#1F4E79',
+          MUNICIPAL: '#2E7D32',
+          FEDERAL:   '#6A1B9A',
+          PRIVADA:   '#5A5A5A',
+        }[e.dependencia] || 'var(--muted)';
+
+        return `
+          <div style="background: var(--paper); border: 1px solid var(--rule);">
+            <div onclick="painelToggleEscola(${idx})" style="padding: 14px 18px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; gap: 12px; border-bottom: 1px solid var(--rule);">
+              <div style="flex: 1; min-width: 0;">
+                <div style="font-family: 'Fraunces', serif; font-size: 17px; color: var(--ink); line-height: 1.3;">${escapeHtml(e.nome || '—')}</div>
+                <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); margin-top: 2px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
+                  ${e.dependencia ? `<span style="display: inline-block; padding: 1px 7px; border: 1px solid ${corDep}; color: ${corDep}; font-weight: 600; font-size: 9px; letter-spacing: 0.05em;">${escapeHtml(e.dependencia)}</span>` : ''}
+                  <span>${e.municipio ? escapeHtml(e.municipio) : '—'}${e.sre ? ' · ' + escapeHtml(e.sre) : ''}</span>
+                </div>
+              </div>
+              <div style="display: flex; align-items: center; gap: 12px; flex-shrink: 0;">
+                <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted);">${(e.cursos || []).length} cursos · ${(e.etapas || []).length} etapas</span>
+                <span id="pn-toggle-${idx}" style="font-family: 'JetBrains Mono', monospace; font-size: 14px; color: var(--ink); width: 14px; text-align: center;">▾</span>
+              </div>
+            </div>
+            <div id="pn-detalhe-${idx}" style="display: block; padding: 8px 14px 12px;">
+              ${cursosHtml}
+              ${etapasHtml}
+            </div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    function renderItemPainel(item, tipo) {
+      const cfg = PAINEL_STATUS_CFG[item.situacao] || PAINEL_STATUS_CFG.sem_vencimento;
+      const titulo = tipo === 'curso' ? (item.nome || '—') : (item.etapa || '—');
+      const tipoLabel = tipo === 'curso' ? 'Curso' : 'Etapa';
+
+      const formatarData = (d) => {
+        if (!d) return '—';
+        const partes = d.split('-');
+        return partes.length === 3 ? `${partes[2]}/${partes[1]}/${partes[0]}` : d;
+      };
+
+      let infoVencimento = '';
+      if (item.dias_para_vencer != null) {
+        const dias = item.dias_para_vencer;
+        if (dias < 0) infoVencimento = `vencido há ${Math.abs(dias)} dias`;
+        else if (dias === 0) infoVencimento = 'vence hoje';
+        else if (dias < 30) infoVencimento = `vence em ${dias} dias`;
+        else if (dias < 365) infoVencimento = `vence em ${Math.round(dias / 30)} meses`;
+        else infoVencimento = `vence em ${(dias / 365).toFixed(1)} anos`;
+      }
+
+      return `
+        <div style="display: flex; align-items: center; gap: 10px; padding: 8px 6px; border-bottom: 1px dashed var(--rule);">
+          <span style="display: inline-block; width: 5px; align-self: stretch; background: ${cfg.cor};"></span>
+          <div style="flex: 1; min-width: 0;">
+            <div style="display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;">
+              <span style="font-family: 'Inter', sans-serif; font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600;">${tipoLabel}</span>
+              ${item.categoria_nivel ? `<span style="font-family: 'Inter', sans-serif; font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink); padding: 1px 6px; background: var(--cream); border: 1px solid var(--rule);">${escapeHtml(item.categoria_nivel)}</span>` : ''}
+              <span style="font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink); font-weight: 500;">${escapeHtml(titulo)}</span>
+              ${item.qualificacoes ? `<span style="font-family: 'Inter', sans-serif; font-size: 11px; color: var(--muted); font-style: italic;">— ${escapeHtml(item.qualificacoes)}</span>` : ''}
+            </div>
+            <div style="font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--muted); margin-top: 2px;">
+              ${item.ato_descricao ? escapeHtml(item.ato_descricao) + ' · ' : ''}Início: ${formatarData(item.data_inicio_vigencia)} · Vencimento: ${formatarData(item.data_vencimento)}${item.portaria_numero ? ' · Port. ' + escapeHtml(item.portaria_numero) : ''}
+            </div>
+          </div>
+          <div style="text-align: right; flex-shrink: 0;">
+            <div style="display: inline-block; padding: 3px 10px; background: ${cfg.cor_bg}; border: 1px solid ${cfg.cor}; color: ${cfg.cor}; font-family: 'Inter', sans-serif; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap;">${cfg.icon} ${cfg.label}</div>
+            ${infoVencimento ? `<div style="font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--muted); margin-top: 3px;">${infoVencimento}</div>` : ''}
+          </div>
+        </div>
+      `;
+    }
+
+    function painelToggleEscola(idx) {
+      const det = document.getElementById('pn-detalhe-' + idx);
+      const tog = document.getElementById('pn-toggle-' + idx);
+      if (!det || !tog) return;
+      if (det.style.display === 'none') {
+        det.style.display = 'block';
+        tog.textContent = '▾';
+      } else {
+        det.style.display = 'none';
+        tog.textContent = '▸';
+      }
+    }
 
     function pararBuscaIA() { /* não necessário com job server-side */ }
 
