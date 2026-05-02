@@ -834,6 +834,9 @@
       <button class="tab" data-tab="buscar" onclick="trocarAba('buscar')">
         Buscar
       </button>
+      <button class="tab" data-tab="formato-novo" onclick="trocarAba('formato-novo')">
+        Formato Novo
+      </button>
     </nav>
 
     <!-- View: Extração -->
@@ -1038,6 +1041,36 @@
       <!-- Resultados -->
       <div id="busca-resultados" style="margin-top: 16px;"></div>
     </div><!-- /view-buscar -->
+
+    <!-- View: Formato Novo -->
+    <div class="view" id="view-formato-novo">
+      <h2 class="view-title">Detectar formato novo</h2>
+      <p class="view-subtitle">Suba PDFs de um ano novo e a IA verifica se o sistema atual consegue processar — sem salvar no banco</p>
+
+      <div style="margin-top: 24px; padding: 20px; background: var(--cream); border: 1px solid var(--rule);">
+        <p style="font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink); margin-bottom: 12px;">
+          <strong>Como funciona:</strong>
+        </p>
+        <ol style="font-family: 'Inter', sans-serif; font-size: 13px; color: var(--muted); padding-left: 20px; line-height: 1.7; margin-bottom: 16px;">
+          <li>Você seleciona um PDF de um diário oficial (preferencialmente do ano novo que quer testar)</li>
+          <li>O sistema extrai apenas a seção "Assessoria de Inspeção Escolar" (sem salvar no banco)</li>
+          <li>A IA Claude analisa o trecho e te diz se o formato é compatível</li>
+          <li>Se houver mudança, copie o relatório e me mande para ajustar o código</li>
+        </ol>
+
+        <input type="file" id="fn-input" accept="application/pdf,.pdf" style="display: none;" />
+        <button class="btn-primary" onclick="document.getElementById('fn-input').click()" style="white-space: nowrap;">
+          Selecionar PDF para análise
+        </button>
+        <span id="fn-arquivo" style="margin-left: 12px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--muted);"></span>
+      </div>
+
+      <!-- Status -->
+      <div id="fn-status" style="margin-top: 16px; display: none; padding: 14px 16px; background: var(--paper); border: 1px solid var(--rule); font-family: 'JetBrains Mono', monospace; font-size: 12px;"></div>
+
+      <!-- Resultado da análise -->
+      <div id="fn-resultado" style="margin-top: 16px;"></div>
+    </div><!-- /view-formato-novo -->
 
 
     <footer class="footer">
@@ -2024,6 +2057,199 @@
         </div>
       `;
     }
+
+    // === FORMATO NOVO (detecção de mudanças) ===
+    async function fnAnalisar(file) {
+      const status = document.getElementById('fn-status');
+      const resultado = document.getElementById('fn-resultado');
+      const arquivoLabel = document.getElementById('fn-arquivo');
+      arquivoLabel.textContent = file.name;
+      resultado.innerHTML = '';
+      status.style.display = 'block';
+      status.style.color = 'var(--ink)';
+      status.textContent = '⏳ Etapa 1/2: Extraindo seção de Inspeção Escolar do PDF...';
+
+      try {
+        // Etapa 1: extrair seção via Vercel
+        const fd = new FormData();
+        fd.append('file', file);
+        const r1 = await fetch('/api/extrair_secao', { method: 'POST', body: fd });
+        const d1 = await r1.json();
+
+        if (!r1.ok || !d1.ok) {
+          status.style.color = 'var(--accent)';
+          status.textContent = '✗ Erro ao extrair PDF: ' + (d1.erro || d1.mensagem || 'desconhecido');
+          return;
+        }
+
+        if (!d1.secao_encontrada) {
+          status.style.color = 'var(--accent)';
+          status.textContent = '⚠ Seção de Inspeção Escolar NÃO foi localizada neste PDF. ' + (d1.mensagem || '');
+          return;
+        }
+
+        status.textContent = `✓ Seção encontrada (${d1.tamanho_secao_chars} chars, ${d1.qtd_portarias_extraidas_pelo_codigo_atual} portarias detectadas pelo código atual). Etapa 2/2: enviando para análise da IA...`;
+
+        // Etapa 2: análise pela IA
+        const r2 = await fetch(`${SUPABASE_FN}/detectar-formato`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ trecho: d1.trecho }),
+        });
+        const d2 = await r2.json();
+
+        if (!r2.ok || !d2.ok) {
+          status.style.color = 'var(--accent)';
+          status.textContent = '✗ Erro na análise da IA: ' + (d2.erro || 'desconhecido');
+          return;
+        }
+
+        status.style.color = 'var(--ink)';
+        status.textContent = `✓ Análise concluída · ${d2.caracteres_analisados} chars analisados${d2.caracteres_truncados > 0 ? ` (${d2.caracteres_truncados} chars truncados)` : ''}`;
+
+        renderRelatorioFormato(d1, d2.analise);
+
+      } catch (e) {
+        status.style.color = 'var(--accent)';
+        status.textContent = '✗ Erro: ' + e.message;
+      }
+    }
+
+    function renderRelatorioFormato(extracao, analise) {
+      const cor = {
+        usar_normalmente: '#1f7a3f',
+        ajuste_pequeno: '#a06a00',
+        ajuste_grande: 'var(--accent)',
+      }[analise.recomendacao] || 'var(--ink)';
+
+      const rotulo = {
+        usar_normalmente: '✓ Pode usar normalmente',
+        ajuste_pequeno: '⚠ Ajuste pequeno necessário',
+        ajuste_grande: '⚠ Ajuste grande necessário',
+      }[analise.recomendacao] || analise.recomendacao;
+
+      const renderLista = (items, cor, prefix) => {
+        if (!items || items.length === 0) return '';
+        return `<ul style="font-family:'Inter',sans-serif;font-size:13px;color:${cor};padding-left:18px;margin:6px 0;line-height:1.7;">${items.map(i => `<li>${prefix}${escapeHtml(typeof i === 'string' ? i : JSON.stringify(i))}</li>`).join('')}</ul>`;
+      };
+
+      const exemplosHtml = (analise.exemplos_portarias || []).map(ex => `
+        <div style="padding: 10px 14px; background: var(--cream); border: 1px solid var(--rule); margin-bottom: 8px;">
+          <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); margin-bottom: 4px;">Portaria ${escapeHtml(ex.numero || '?')}</div>
+          <div style="font-family: 'Inter', sans-serif; font-size: 12px; color: var(--ink);"><strong>Início:</strong> ${escapeHtml(ex.primeiras_palavras || '—')}</div>
+          <div style="font-family: 'Inter', sans-serif; font-size: 12px; color: var(--ink); margin-top: 2px;"><strong>Terminador:</strong> ${escapeHtml(ex.terminador || '—')}</div>
+        </div>
+      `).join('');
+
+      const resultado = document.getElementById('fn-resultado');
+      resultado.innerHTML = `
+        <div style="padding: 20px 24px; background: var(--paper); border: 1px solid var(--rule); margin-bottom: 16px;">
+          <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 14px; flex-wrap: wrap;">
+            <div>
+              <h3 style="font-family: 'Fraunces', serif; font-size: 22px; color: ${cor}; margin: 0 0 4px 0;">${rotulo}</h3>
+              <div style="font-family: 'Inter', sans-serif; font-size: 12px; color: var(--muted);">
+                Confiança da análise: <strong style="color: var(--ink);">${analise.confianca || '—'}</strong> · ${analise.portarias_detectadas || 0} portarias identificadas
+              </div>
+            </div>
+            <button onclick="fnCopiarRelatorio()" style="background: none; border: 1px solid var(--rule); padding: 8px 16px; font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer; color: var(--ink); white-space: nowrap;">📋 Copiar relatório</button>
+          </div>
+
+          ${analise.observacoes ? `
+            <div style="padding: 12px 14px; background: var(--cream); border-left: 3px solid ${cor}; margin-bottom: 14px;">
+              <strong style="font-family: 'Inter', sans-serif; font-size: 12px; color: var(--ink);">Resumo da IA:</strong>
+              <div style="font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink); font-style: italic; margin-top: 4px;">${escapeHtml(analise.observacoes)}</div>
+            </div>
+          ` : ''}
+
+          ${analise.padroes_OK && analise.padroes_OK.length > 0 ? `
+            <div style="margin-top: 12px;">
+              <div style="font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: #1f7a3f; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px;">✓ Padrões compatíveis</div>
+              ${renderLista(analise.padroes_OK, '#1f7a3f', '')}
+            </div>
+          ` : ''}
+
+          ${analise.padroes_NOVOS && analise.padroes_NOVOS.length > 0 ? `
+            <div style="margin-top: 12px;">
+              <div style="font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: 'var(--accent)'; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px;">⚠ Padrões NOVOS (não esperados)</div>
+              ${renderLista(analise.padroes_NOVOS, 'var(--accent)', '')}
+            </div>
+          ` : ''}
+
+          ${analise.padroes_FALTANDO && analise.padroes_FALTANDO.length > 0 ? `
+            <div style="margin-top: 12px;">
+              <div style="font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: #a06a00; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px;">⚠ Padrões esperados FALTANDO</div>
+              ${renderLista(analise.padroes_FALTANDO, '#a06a00', '')}
+            </div>
+          ` : ''}
+
+          ${exemplosHtml ? `
+            <div style="margin-top: 16px;">
+              <div style="font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px;">Amostra de portarias detectadas</div>
+              ${exemplosHtml}
+            </div>
+          ` : ''}
+
+          <div style="margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--rule); font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--muted);">
+            Arquivo: ${escapeHtml(extracao.arquivo)} · Data do diário: ${extracao.data_diario || '—'} · Página inicial: ${extracao.pagina_inicio || '—'} · Código atual extraiu: ${extracao.qtd_portarias_extraidas_pelo_codigo_atual} portarias
+          </div>
+        </div>
+
+        <details style="margin-top: 12px;">
+          <summary style="cursor: pointer; font-family: 'Inter', sans-serif; font-size: 12px; color: var(--muted); padding: 8px 0;">Ver trecho extraído (primeiros 15.000 chars)</summary>
+          <pre id="fn-trecho-bruto" style="margin-top: 8px; padding: 14px; background: var(--cream); border: 1px solid var(--rule); font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--ink); white-space: pre-wrap; max-height: 400px; overflow: auto; line-height: 1.5;">${escapeHtml(extracao.trecho || '')}</pre>
+        </details>
+      `;
+
+      // Guarda o relatório em variável global pra função "Copiar"
+      window._fnRelatorio = {
+        arquivo: extracao.arquivo,
+        data_diario: extracao.data_diario,
+        portarias_pelo_codigo: extracao.qtd_portarias_extraidas_pelo_codigo_atual,
+        analise,
+      };
+    }
+
+    function fnCopiarRelatorio() {
+      if (!window._fnRelatorio) return;
+      const r = window._fnRelatorio;
+      const txt = `RELATORIO DE FORMATO NOVO
+Arquivo: ${r.arquivo}
+Data do diário: ${r.data_diario || '—'}
+Portarias detectadas pelo código atual: ${r.portarias_pelo_codigo}
+
+ANÁLISE DA IA:
+Recomendação: ${r.analise.recomendacao}
+Confiança: ${r.analise.confianca}
+Portarias detectadas pela IA: ${r.analise.portarias_detectadas}
+
+Observações: ${r.analise.observacoes || '—'}
+
+Padrões OK: ${(r.analise.padroes_OK || []).join(' | ') || '—'}
+
+Padrões NOVOS: ${(r.analise.padroes_NOVOS || []).join(' | ') || '—'}
+
+Padrões FALTANDO: ${(r.analise.padroes_FALTANDO || []).join(' | ') || '—'}
+
+Exemplos:
+${(r.analise.exemplos_portarias || []).map(ex => `- ${ex.numero}: "${ex.primeiras_palavras}" → "${ex.terminador}"`).join('\n') || '—'}
+`;
+      navigator.clipboard.writeText(txt).then(() => {
+        showToast('Relatório copiado para a área de transferência', 'success');
+      }).catch(() => {
+        showToast('Erro ao copiar', 'error');
+      });
+    }
+
+    // Listener pro input de upload
+    document.addEventListener('DOMContentLoaded', () => {
+      const fnInput = document.getElementById('fn-input');
+      if (fnInput) {
+        fnInput.addEventListener('change', (ev) => {
+          const file = ev.target.files[0];
+          if (file) fnAnalisar(file);
+        });
+      }
+    });
 
     function pararBuscaIA() { /* não necessário com job server-side */ }
 
