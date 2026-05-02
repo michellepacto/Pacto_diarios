@@ -875,6 +875,50 @@
 
       <div class="stats-grid" id="stats-grid"></div>
 
+      <!-- Painel de filtros -->
+      <div id="extracao-filtros" style="margin-bottom: 20px; padding: 18px 20px; background: var(--cream); border: 1px solid var(--rule);">
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 12px;">
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;">Buscar</label>
+            <input type="text" id="filtro-busca" placeholder="Nº, escola, município..." oninput="aplicarFiltros()" style="width: 100%; padding: 8px 10px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);">
+          </div>
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;">Ano</label>
+            <select id="filtro-ano" onchange="aplicarFiltros()" style="width: 100%; padding: 8px 10px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);">
+              <option value="">Todos</option>
+            </select>
+          </div>
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;">Tipo de Ato</label>
+            <select id="filtro-ato" onchange="aplicarFiltros()" style="width: 100%; padding: 8px 10px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);">
+              <option value="">Todos</option>
+            </select>
+          </div>
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;">SRE</label>
+            <select id="filtro-sre" onchange="aplicarFiltros()" style="width: 100%; padding: 8px 10px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);">
+              <option value="">Todas</option>
+            </select>
+          </div>
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;">Ordenar por</label>
+            <select id="filtro-ordem" onchange="aplicarFiltros()" style="width: 100%; padding: 8px 10px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);">
+              <option value="data_desc">Data do diário (mais recente)</option>
+              <option value="data_asc">Data do diário (mais antiga)</option>
+              <option value="numero_desc">Nº portaria (maior)</option>
+              <option value="numero_asc">Nº portaria (menor)</option>
+              <option value="vencimento_asc">Vencimento (mais próximo)</option>
+              <option value="vencimento_desc">Vencimento (mais distante)</option>
+              <option value="escola_asc">Escola (A-Z)</option>
+            </select>
+          </div>
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+          <div id="filtro-resumo" style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted);">—</div>
+          <button onclick="limparFiltrosExtracao()" style="background: none; border: 1px solid var(--rule); padding: 6px 14px; font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer; color: var(--ink);">Limpar filtros</button>
+        </div>
+      </div>
+
       <div class="portarias-list" id="portarias-list"></div>
     </section>
     </div><!-- /view-extracao -->
@@ -1267,16 +1311,111 @@
       showToast('Processamento concluído', 'success');
     });
 
+    let portariasFiltradas = [];
+
+    function popularSelectsFiltros() {
+      // Popular ano com base em data_diario ou ano da portaria
+      const anos = new Set();
+      const atos = new Set();
+      const sres = new Set();
+      allPortarias.forEach(p => {
+        if (p.data_diario) anos.add(p.data_diario.slice(0, 4));
+        else if (p.ano) anos.add(String(p.ano));
+        if (p.ato_descricao_ia) atos.add(p.ato_descricao_ia);
+        if (p.sre) sres.add(p.sre);
+      });
+
+      const selAno = document.getElementById('filtro-ano');
+      const valAtual = selAno.value;
+      selAno.innerHTML = '<option value="">Todos</option>' +
+        Array.from(anos).sort((a,b) => b.localeCompare(a))
+          .map(a => `<option value="${a}">${a}</option>`).join('');
+      selAno.value = valAtual;
+
+      const selAto = document.getElementById('filtro-ato');
+      const valAto = selAto.value;
+      selAto.innerHTML = '<option value="">Todos</option>' +
+        Array.from(atos).sort()
+          .map(a => `<option value="${escapeHtml(a)}">${escapeHtml(a)}</option>`).join('');
+      selAto.value = valAto;
+
+      const selSre = document.getElementById('filtro-sre');
+      const valSre = selSre.value;
+      selSre.innerHTML = '<option value="">Todas</option>' +
+        Array.from(sres).sort()
+          .map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
+      selSre.value = valSre;
+    }
+
+    function aplicarFiltros() {
+      const txtBusca = (document.getElementById('filtro-busca').value || '').toLowerCase().trim();
+      const filtroAno = document.getElementById('filtro-ano').value;
+      const filtroAto = document.getElementById('filtro-ato').value;
+      const filtroSre = document.getElementById('filtro-sre').value;
+      const ordem     = document.getElementById('filtro-ordem').value;
+
+      portariasFiltradas = allPortarias.filter(p => {
+        if (filtroAno) {
+          const anoP = (p.data_diario || '').slice(0, 4) || String(p.ano || '');
+          if (anoP !== filtroAno) return false;
+        }
+        if (filtroAto && p.ato_descricao_ia !== filtroAto) return false;
+        if (filtroSre && p.sre !== filtroSre) return false;
+        if (txtBusca) {
+          const blob = [
+            p.numero_completo, p.escola_nome, p.escola_nome_ia,
+            p.municipio, p.sre, p.ato_descricao_ia, p.curso_ia,
+            p.etapa_ensino_ia, p.texto_completo
+          ].filter(Boolean).join(' ').toLowerCase();
+          if (!blob.includes(txtBusca)) return false;
+        }
+        return true;
+      });
+
+      const sortFn = {
+        data_desc: (a,b) => (b.data_diario||'').localeCompare(a.data_diario||''),
+        data_asc:  (a,b) => (a.data_diario||'').localeCompare(b.data_diario||''),
+        numero_desc: (a,b) => (parseInt(b.numero_portaria)||0) - (parseInt(a.numero_portaria)||0),
+        numero_asc:  (a,b) => (parseInt(a.numero_portaria)||0) - (parseInt(b.numero_portaria)||0),
+        vencimento_asc: (a,b) => {
+          const av = a.data_vencimento_ia || '9999-12-31';
+          const bv = b.data_vencimento_ia || '9999-12-31';
+          return av.localeCompare(bv);
+        },
+        vencimento_desc: (a,b) => {
+          const av = a.data_vencimento_ia || '0000-01-01';
+          const bv = b.data_vencimento_ia || '0000-01-01';
+          return bv.localeCompare(av);
+        },
+        escola_asc: (a,b) => (a.escola_nome_ia||a.escola_nome||'').localeCompare(b.escola_nome_ia||b.escola_nome||''),
+      }[ordem];
+      if (sortFn) portariasFiltradas.sort(sortFn);
+
+      // Resumo
+      const resumo = document.getElementById('filtro-resumo');
+      if (portariasFiltradas.length === allPortarias.length) {
+        resumo.textContent = `Mostrando todas as ${allPortarias.length} portarias`;
+      } else {
+        resumo.textContent = `Mostrando ${portariasFiltradas.length} de ${allPortarias.length} portarias`;
+      }
+
+      renderListaPortarias();
+    }
+
+    function limparFiltrosExtracao() {
+      document.getElementById('filtro-busca').value = '';
+      document.getElementById('filtro-ano').value = '';
+      document.getElementById('filtro-ato').value = '';
+      document.getElementById('filtro-sre').value = '';
+      document.getElementById('filtro-ordem').value = 'data_desc';
+      aplicarFiltros();
+    }
+
     function renderResults() {
       if (allPortarias.length === 0) return;
 
       const section = document.getElementById('results');
       section.classList.add('active');
-
-      const stats = {};
-      allPortarias.forEach(p => {
-        stats[p.tipo_acao] = (stats[p.tipo_acao] || 0) + 1;
-      });
 
       const tipoLabels = {
         mudanca_logradouro: 'Mudança Logradouro',
@@ -1287,6 +1426,11 @@
         outros: 'Outros',
       };
 
+      // Stats
+      const stats = {};
+      allPortarias.forEach(p => {
+        stats[p.tipo_acao] = (stats[p.tipo_acao] || 0) + 1;
+      });
       const statsGrid = document.getElementById('stats-grid');
       statsGrid.innerHTML = `
         <div class="stat-card accent">
@@ -1301,8 +1445,25 @@
         `).join('')}
       `;
 
+      popularSelectsFiltros();
+      aplicarFiltros();
+    }
+
+    function renderListaPortarias() {
+      const tipoLabels = {
+        mudanca_logradouro: 'Mudança Logradouro',
+        cessacao: 'Cessação',
+        autorizacao: 'Autorização',
+        mudanca_mantenedora: 'Mudança Mantenedora',
+        mudanca_predio: 'Mudança Prédio',
+        outros: 'Outros',
+      };
       const list = document.getElementById('portarias-list');
-      list.innerHTML = allPortarias.map((p, idx) => `
+      if (portariasFiltradas.length === 0) {
+        list.innerHTML = '<p style="text-align:center;padding:40px;color:var(--muted);font-family:Inter,sans-serif;">Nenhuma portaria corresponde aos filtros aplicados.</p>';
+        return;
+      }
+      list.innerHTML = portariasFiltradas.map((p, idx) => `
         <article class="portaria-card" data-tipo="${p.tipo_acao}" data-expanded="false" id="portaria-${idx}">
           <div class="portaria-header">
             <span class="portaria-numero">Portaria ${p.numero_completo}</span>
