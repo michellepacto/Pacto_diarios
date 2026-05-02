@@ -211,29 +211,37 @@ def quebrar_em_portarias(texto_secao: str) -> list:
         
         texto_portaria = texto_secao[inicio:fim].strip()
         
-        # CORTE NO FIM DO ATO: identifica o primeiro de vários terminadores
-        # possíveis e corta o texto ali. Necessário para evitar capturar lixo
-        # de outras seções, especialmente para a ÚLTIMA portaria do bloco.
-        #
-        # Terminadores (em ordem de prioridade — pega o que aparecer primeiro):
-        #   1. "SRE – Nome" (com travessão) — fim canônico de cada ato
-        #   2. "Atos assinados pel[oa] Sub/Secretári[oa]" — fim da seção inteira
-        #   3. "Superintendências Regionais" — começo da próxima seção (SREs)
+        # CORTE NO FIM DO ATO: lista expandida de terminadores
+        # Inclui todos os padrões observados nos PDFs de 2020-2025
         terminadores = [
-            r'SRE\s*[–\-]\s*[A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ\s]*?(?:\n|$)',
-            r'\n\s*Atos\s+assinados\s+pel[oa]\s+(?:Sub)?[Ss]ecret[áa]ri[oa]',
-            r'\n\s*Superintend[êe]ncias?\s+Regionais',
+            # 1. SRE – Nome (todas as variantes: hífen, travessão, em-dash)
+            (r'SRE\s*[–\-—]\s*[A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ\s]*?(?:\.|\n|$)', 'incluir'),
+            # 2. SRE Nome (sem separador) - ex: "SRE Metropolitana C"
+            (r'\n\s*SRE\s+[A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ\s]+?\n', 'antes'),
+            # 3. Atos assinados (fim da seção inteira)
+            (r'\n\s*Atos\s+assinados\s+pel[oa]\s+(?:Sub)?[Ss]ecret[áa]ri[oa]', 'antes'),
+            # 4. Superintendências Regionais (próxima seção)
+            (r'\n\s*Superintend[êe]ncias?\s+Regionais', 'antes'),
+            # 5. Atos de Recursos Humanos (NÃO são da inspeção escolar)
+            (r'\n\s*QUINQU[ÊE]NIO\s*[-–]\s*ATO\s*N', 'antes'),
+            (r'\n\s*RETIFICA[ÇC][ÃA]O\s*[-–]\s*ATO\s*N', 'antes'),
+            (r'\n\s*ANULA[ÇC][ÃA]O\s*[-–]\s*ATO\s*N', 'antes'),
+            (r'\n\s*REVOGA[ÇC][ÃA]O\s*[-–]\s*ATO\s*N', 'antes'),
+            (r'\n\s*GRATIFICA[ÇC][ÃA]O\s+DE\s+INCENTIVO', 'antes'),
+            (r'\n\s*F[ÉE]RIAS\s*[-–]\s*PR[ÊE]MIO', 'antes'),
+            (r'\n\s*AFASTAMENTO\s+PRELIMINAR', 'antes'),
+            # 6. Cabeçalho de outra Superintendência (ex: "SRE Metropolitana C\nDiretora:")
+            (r'\n\s*Diretor[ae]?:\s+[A-ZÁÉÍÓÚÂÊÔÃÕÇ]', 'antes'),
+            # 7. Marcador de assinatura digital (rodapé do diário)
+            (r'Documento\s+assinado\s+eletr[ôo]nicamente', 'antes'),
+            # 8. Identificador único do ato (ex: "29 1318018 - 1")
+            (r'\n\s*\d{2}\s+\d{7}\s*-\s*\d', 'antes'),
         ]
         melhor_corte = None
-        for padrao in terminadores:
+        for padrao, modo in terminadores:
             m = re.search(padrao, texto_portaria)
             if m:
-                # Para o terminador 1 (SRE – Nome), incluir o nome no corte;
-                # para os outros (que iniciam outra seção), cortar ANTES
-                if padrao == terminadores[0]:
-                    pos_corte = m.end()
-                else:
-                    pos_corte = m.start()
+                pos_corte = m.end() if modo == 'incluir' else m.start()
                 if melhor_corte is None or pos_corte < melhor_corte:
                     melhor_corte = pos_corte
         if melhor_corte is not None:
