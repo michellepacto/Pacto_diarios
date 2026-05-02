@@ -2539,8 +2539,8 @@ ${(r.analise.exemplos_portarias || []).map(ex => `- ${ex.numero}: "${ex.primeira
 
       lista.innerHTML = escolas.map((e, idx) => {
         const totalItens = (e.cursos || []).length + (e.etapas || []).length;
-        const cursosHtml = (e.cursos || []).map(c => renderItemPainel(c, 'curso')).join('');
-        const etapasHtml = (e.etapas || []).map(et => renderItemPainel(et, 'etapa')).join('');
+        const cursosHtml = (e.cursos || []).map(c => renderItemPainel(c, 'curso', e.id)).join('');
+        const etapasHtml = (e.etapas || []).map(et => renderItemPainel(et, 'etapa', e.id)).join('');
 
         // Cores discretas por dependência
         const corDep = {
@@ -2574,7 +2574,7 @@ ${(r.analise.exemplos_portarias || []).map(ex => `- ${ex.numero}: "${ex.primeira
       }).join('');
     }
 
-    function renderItemPainel(item, tipo) {
+    function renderItemPainel(item, tipo, escolaId) {
       const cfg = PAINEL_STATUS_CFG[item.situacao] || PAINEL_STATUS_CFG.sem_vencimento;
       const titulo = tipo === 'curso' ? (item.nome || '—') : (item.etapa || '—');
       const tipoLabel = tipo === 'curso' ? 'Curso' : 'Etapa';
@@ -2595,6 +2595,12 @@ ${(r.analise.exemplos_portarias || []).map(ex => `- ${ex.numero}: "${ex.primeira
         else infoVencimento = `vence em ${(dias / 365).toFixed(1)} anos`;
       }
 
+      // Histórico: aparece só quando há mais de 1 ato pra essa escola+curso/etapa
+      const temHistorico = item.qtd_historico && item.qtd_historico > 1;
+      const itemId = `${tipo}-${item.id}`;
+      const chave = tipo === 'curso' ? (item.curso_chave || '') : (item.etapa_chave || '');
+      const chaveJson = JSON.stringify(chave).replace(/"/g, '&quot;');
+
       return `
         <div style="display: flex; align-items: center; gap: 10px; padding: 8px 6px; border-bottom: 1px dashed var(--rule);">
           <span style="display: inline-block; width: 5px; align-self: stretch; background: ${cfg.cor};"></span>
@@ -2605,15 +2611,79 @@ ${(r.analise.exemplos_portarias || []).map(ex => `- ${ex.numero}: "${ex.primeira
               <span style="font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink); font-weight: 500;">${escapeHtml(titulo)}</span>
               ${item.qualificacoes ? `<span style="font-family: 'Inter', sans-serif; font-size: 11px; color: var(--muted); font-style: italic;">— ${escapeHtml(item.qualificacoes)}</span>` : ''}
             </div>
-            <div style="font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--muted); margin-top: 2px;">
-              ${item.ato_descricao ? escapeHtml(item.ato_descricao) + ' · ' : ''}Início: ${formatarData(item.data_inicio_vigencia)} · Vencimento: ${formatarData(item.data_vencimento)}${item.portaria_numero ? ' · Port. ' + escapeHtml(item.portaria_numero) : ''}
+            <div style="font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--muted); margin-top: 2px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
+              <span>${item.ato_descricao ? escapeHtml(item.ato_descricao) + ' · ' : ''}Início: ${formatarData(item.data_inicio_vigencia)} · Vencimento: ${formatarData(item.data_vencimento)}${item.portaria_numero ? ' · Port. ' + escapeHtml(item.portaria_numero) : ''}</span>
+              ${temHistorico ? `<button onclick="painelToggleHistorico('${itemId}', '${escolaId}', '${tipo}', ${chaveJson})" style="background: var(--cream); border: 1px solid var(--rule); padding: 1px 8px; font-family: 'Inter', sans-serif; font-size: 10px; cursor: pointer; color: var(--ink); text-transform: uppercase; letter-spacing: 0.04em;">▸ Ver histórico (${item.qtd_historico})</button>` : ''}
             </div>
+            <div id="hist-${itemId}" style="display: none; margin-top: 8px; padding: 8px 10px; background: var(--cream); border-left: 2px solid var(--gold);"></div>
           </div>
           <div style="text-align: right; flex-shrink: 0;">
             <div style="display: inline-block; padding: 3px 10px; background: ${cfg.cor_bg}; border: 1px solid ${cfg.cor}; color: ${cfg.cor}; font-family: 'Inter', sans-serif; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap;">${cfg.icon} ${cfg.label}</div>
             ${infoVencimento ? `<div style="font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--muted); margin-top: 3px;">${infoVencimento}</div>` : ''}
           </div>
         </div>
+      `;
+    }
+
+    async function painelToggleHistorico(itemId, escolaId, tipo, chave) {
+      const div = document.getElementById('hist-' + itemId);
+      if (!div) return;
+      // Se já está aberto, fecha
+      if (div.style.display === 'block') {
+        div.style.display = 'none';
+        return;
+      }
+      // Se ainda não carregou, busca
+      if (!div.dataset.carregado) {
+        div.style.display = 'block';
+        div.innerHTML = `<div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted);">Carregando histórico...</div>`;
+        try {
+          const r = await fetch(`${SUPABASE_FN}/painel-escolas`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ acao: 'historico', escola_id: escolaId, tipo_item: tipo, chave }),
+          });
+          const d = await r.json();
+          if (!r.ok || d.erro) throw new Error(d.erro || 'Erro');
+          div.innerHTML = renderHistorico(d.historico || [], tipo);
+          div.dataset.carregado = '1';
+        } catch (e) {
+          div.innerHTML = `<div style="color: var(--accent); font-family: 'Inter', sans-serif; font-size: 11px;">Erro: ${escapeHtml(e.message)}</div>`;
+        }
+      } else {
+        div.style.display = 'block';
+      }
+    }
+
+    function renderHistorico(itens, tipo) {
+      if (!itens || itens.length === 0) {
+        return `<div style="font-family: 'Inter', sans-serif; font-size: 11px; color: var(--muted);">Sem histórico adicional.</div>`;
+      }
+      const formatarData = (d) => {
+        if (!d) return '—';
+        const partes = d.split('-');
+        return partes.length === 3 ? `${partes[2]}/${partes[1]}/${partes[0]}` : d;
+      };
+      const titulo = tipo === 'curso' ? 'Histórico do curso' : 'Histórico da etapa';
+      const linhas = itens.map(it => {
+        const cfg = PAINEL_STATUS_CFG[it.situacao] || PAINEL_STATUS_CFG.sem_vencimento;
+        const vigente = it.is_vigente
+          ? `<span style="display: inline-block; padding: 1px 6px; background: var(--gold); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; margin-right: 6px;">VIGENTE</span>`
+          : `<span style="display: inline-block; padding: 1px 6px; background: var(--paper); color: var(--muted); font-family: 'Inter', sans-serif; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-right: 6px; border: 1px solid var(--rule);">SUPERADO</span>`;
+        return `
+          <div style="padding: 6px 0; border-bottom: 1px dotted var(--rule); font-family: 'Inter', sans-serif; font-size: 11px; color: var(--ink);">
+            ${vigente}
+            <strong>${escapeHtml(it.ato_descricao || '—')}</strong> · 
+            Port. ${escapeHtml(it.portaria_numero || '?')} · 
+            Diário ${formatarData(it.data_diario)} · 
+            Vigência: ${formatarData(it.data_inicio_vigencia)} → ${formatarData(it.data_vencimento)}
+            <span style="display: inline-block; padding: 1px 6px; background: ${cfg.cor_bg}; color: ${cfg.cor}; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; margin-left: 6px;">${cfg.icon} ${cfg.label}</span>
+          </div>
+        `;
+      }).join('');
+      return `
+        <div style="font-family: 'Inter', sans-serif; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; margin-bottom: 6px;">${titulo} (${itens.length} atos)</div>
+        ${linhas}
       `;
     }
 
