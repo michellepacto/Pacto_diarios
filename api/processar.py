@@ -1,729 +1,2756 @@
-"""
-Vercel Serverless Function - Processa PDF do Supabase Storage
-e insere portarias da Assessoria de Inspeção Escolar no banco.
-
-Endpoint: POST /api/processar
-Recebe:   JSON com {"storage_path": "diarios/arquivo.pdf"}
-Retorna:  JSON com lista de portarias extraídas/inseridas
-"""
-
-import os
-import re
-import json
-import tempfile
-from datetime import date
-from typing import Optional
-from http.server import BaseHTTPRequestHandler
-
-import fitz  # PyMuPDF
-from supabase import create_client
-
-
-SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
-SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_KEY", "")
-BUCKET_NAME = "diarios"
-
-
-MARCADORES_INICIO = [
-    "ASSESSORIA DE INSPEÇÃO ESCOLAR",
-    "SUPERINTENDÊNCIA DE REGULAÇÃO E INSPEÇÃO ESCOLAR",
-    "SUPERINTENDENCIA DE REGULACAO E INSPECAO ESCOLAR",
-    "ATOS ASSINADOS PELA SUBSECRETÁRIA DE ARTICULAÇÃO EDUCACIONAL",
-    "ATOS ASSINADOS PELA SUBSECRETARIA DE ARTICULACAO EDUCACIONAL",
-]
-
-MARCADORES_FIM = [
-    "Superintendências Regionais de Ensino - SRE",
-    "SUPERINTENDÊNCIAS REGIONAIS DE ENSINO",
-    "SRE de Almenara",
-    "SRE de Araçuaí",
-    "SRE de Barbacena",
-    "SRE de Caratinga",
-    "SRE de Carangola",
-    "SRE de Caxambu",
-    "SRE de Conselheiro Lafaiete",
-    "SRE de Coronel Fabriciano",
-    "SRE de Curvelo",
-    "SRE de Diamantina",
-    "SRE de Divinópolis",
-    "SRE de Governador Valadares",
-    "SRE de Guanhães",
-    "SRE de Itajubá",
-    "SRE de Ituiutaba",
-    "SRE de Januária",
-    "SRE de Juiz de Fora",
-    "SRE de Leopoldina",
-    "SRE de Manhuaçu",
-    "SRE de Metropolitana",
-    "SRE de Monte Carmelo",
-    "SRE de Montes Claros",
-    "SRE de Muriaé",
-    "SRE de Nova Era",
-    "SRE de Ouro Preto",
-    "SRE de Pará de Minas",
-    "SRE de Paracatu",
-    "SRE de Passos",
-    "SRE de Patos de Minas",
-    "SRE de Patrocínio",
-    "SRE de Pirapora",
-    "SRE de Poços de Caldas",
-    "SRE de Ponte Nova",
-    "SRE de Pouso Alegre",
-    "SRE de São João Del Rei",
-    "SRE de São Sebastião do Paraíso",
-    "SRE de Sete Lagoas",
-    "SRE de Teófilo Otoni",
-    "SRE de Ubá",
-    "SRE de Uberaba",
-    "SRE de Uberlândia",
-    "SRE de Unaí",
-    "Fundação Helena Antipoff",
-    "Universidade do Estado",
-    "Universidade Estadual",
-    "Fundação Caio Martins",
-    "Editais e Avisos",
-    "EDITAIS E AVISOS",
-]
-
-
-def extrair_texto_pdf(caminho_pdf: str) -> tuple:
-    texto_completo = ""
-    paginas = {}
-    metadata_title = ""
-    doc = fitz.open(caminho_pdf)
-    try:
-        # Captura o título do metadata — esses Diários vêm com nome
-        # padronizado "Diário_do_Executivo_AAAA-MM-DD.pdf" embutido,
-        # mesmo se a usuária renomear o arquivo depois.
-        metadata_title = (doc.metadata or {}).get("title", "") or ""
-        for i, pagina in enumerate(doc, start=1):
-            txt = pagina.get_text() or ""
-            paginas[i] = txt
-            texto_completo += f"\n[PAGINA_{i}]\n" + txt
-    finally:
-        doc.close()
-    return texto_completo, paginas, metadata_title
-
-
-def localizar_secao(texto_completo: str, paginas: dict) -> tuple:
-    """Localiza a seção de Inspeção Escolar (legacy fallback).
-    
-    Mantida para compatibilidade, mas a estratégia principal agora é
-    identificar portarias diretamente pelo padrão (ver quebrar_em_portarias).
-    Esta função apenas determina a página onde aparece o cabeçalho, se houver.
-    """
-    texto_upper = texto_completo.upper()
-    idx_inicio = -1
-    for marcador in MARCADORES_INICIO:
-        idx = texto_upper.find(marcador)
-        if idx != -1 and (idx_inicio == -1 or idx < idx_inicio):
-            idx_inicio = idx
-    
-    pagina_inicio = None
-    if idx_inicio != -1:
-        for num_pag in paginas:
-            marcador_pag = f"[PAGINA_{num_pag}]"
-            if marcador_pag in texto_completo[:idx_inicio]:
-                pagina_inicio = num_pag
-    
-    # Retorna o texto inteiro (sem marcadores de página) - quebrar_em_portarias
-    # vai fazer o filtro pelo padrão característico das portarias.
-    texto_limpo = re.sub(r'\[PAGINA_\d+\]', '', texto_completo)
-    return texto_limpo.strip(), pagina_inicio
-
-
-def normalizar_texto(texto: str) -> str:
-    texto = re.sub(r'-\s*\n\s*', '', texto)
-    texto = re.sub(r'\s*\n\s*', ' ', texto)
-    texto = re.sub(r'\s+', ' ', texto)
-    return texto.strip()
-
-
-def quebrar_em_portarias(texto_secao: str) -> list:
-    """Identifica portarias/atos da seção de Inspeção/Regulação Escolar.
-    
-    Suporta os 3 formatos identificados ao longo dos anos:
-    
-    1. PORTARIA N.º X/AAAA  (2021)
-    2. PORTARIA SEE N.º X/AAAA  (2023, 2025)
-    3. Atos sem número explícito (2020, 2022) — começam com 
-       "Nos termos do artigo 12/13 da Resolução SEE..." e terminam com "SRE – nome"
-    
-    Estratégia: localiza âncoras pelo INÍCIO DOS ATOS — seja "PORTARIA N.º" ou
-    "Nos termos do artigo X da Resolução SEE" — e captura cada bloco até a próxima 
-    âncora. Filtra por sinais característicos (Resolução SEE + termina com SRE –) 
-    para descartar texto de outras seções.
-    
-    Atos sem número recebem identificadores sequenciais "S/N-NNN/AAAA" baseados
-    na ordem de aparição no documento.
-    """
-    # Âncoras de início de bloco — qualquer uma dessas marca um novo ato
-    # Aceita variacoes: PORTARIA / PORTARIA SEE / PORTARIA SRE / PORTARIA SRE-UBERLANDIA etc.
-    padrao_portaria = r'PORTARIA(?:\s+SEE|\s+SRE(?:[\s\-–][A-ZÁÉÍÓÚÂÊÔÃÕÇa-záéíóúâêôãõç]+)*)?\s+N[\.\s]*[ºoº°°]?\s*(\d+)\s*/\s*(\d{4})'
-    # Aceita artigos 12, 13 (formatos antigos) e 16 (formato novo de 2026 das SREs locais)
-    padrao_nos_termos = r'Nos\s+termos\s+do\s+artigo\s+(?:1[236])\s+(?:da\s+|,\s*inciso)'
-    
-    # Coletar TODAS as âncoras (com tipo) e ordenar por posição
-    ancoras = []
-    
-    for m in re.finditer(padrao_portaria, texto_secao, re.IGNORECASE):
-        ancoras.append({
-            "pos": m.start(),
-            "tipo": "portaria",
-            "numero": m.group(1),
-            "ano": m.group(2),
-        })
-    
-    for m in re.finditer(padrao_nos_termos, texto_secao, re.IGNORECASE):
-        ancoras.append({
-            "pos": m.start(),
-            "tipo": "ato",
-            "numero": None,
-            "ano": None,
-        })
-    
-    # Ordenar por posição
-    ancoras.sort(key=lambda a: a["pos"])
-    
-    # Remover âncoras "ato" que estão DENTRO de uma portaria já identificada
-    # (uma portaria começa com "PORTARIA N.º X" e DEPOIS tem "Nos termos do artigo...")
-    ancoras_finais = []
-    for i, a in enumerate(ancoras):
-        if a["tipo"] == "ato":
-            # Se houver uma "portaria" muito próxima ANTES (até 300 chars),
-            # esse "Nos termos" é parte da portaria, não um novo ato.
-            tem_portaria_antes = any(
-                p["tipo"] == "portaria" and 0 < a["pos"] - p["pos"] < 300
-                for p in ancoras_finais[-3:]  # olha as últimas 3 ancoras
-            )
-            if tem_portaria_antes:
-                continue
-        ancoras_finais.append(a)
-    
-    portarias = []
-    vistos = set()
-    contador_sn = {}  # ano → contador de atos sem número
-    
-    for i, ancora in enumerate(ancoras_finais):
-        inicio = ancora["pos"]
-        fim = ancoras_finais[i + 1]["pos"] if i + 1 < len(ancoras_finais) else len(texto_secao)
-        
-        if fim - inicio > 5000:
-            fim = inicio + 5000
-        
-        texto_portaria = texto_secao[inicio:fim].strip()
-        
-        # CORTE NO FIM DO ATO: lista expandida de terminadores
-        # Inclui todos os padrões observados nos PDFs de 2020-2025
-        terminadores = [
-            # 1. SRE – Nome (todas as variantes: hífen, travessão, em-dash)
-            (r'SRE\s*[–\-—]\s*[A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ\s]*?(?:\.|\n|$)', 'incluir'),
-            # 2. SRE Nome (sem separador) - ex: "SRE Metropolitana C"
-            (r'\n\s*SRE\s+[A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ\s]+?\n', 'antes'),
-            # 3. Atos assinados (fim da seção inteira)
-            (r'\n\s*Atos\s+assinados\s+pel[oa]\s+(?:Sub)?[Ss]ecret[áa]ri[oa]', 'antes'),
-            # 4. Superintendências Regionais (próxima seção)
-            (r'\n\s*Superintend[êe]ncias?\s+Regionais', 'antes'),
-            # 5. Atos de Recursos Humanos (NÃO são da inspeção escolar)
-            (r'\n\s*QUINQU[ÊE]NIO\s*[-–]\s*ATO\s*N', 'antes'),
-            (r'\n\s*RETIFICA[ÇC][ÃA]O\s*[-–]\s*ATO\s*N', 'antes'),
-            (r'\n\s*ANULA[ÇC][ÃA]O\s*[-–]\s*ATO\s*N', 'antes'),
-            (r'\n\s*REVOGA[ÇC][ÃA]O\s*[-–]\s*ATO\s*N', 'antes'),
-            (r'\n\s*GRATIFICA[ÇC][ÃA]O\s+DE\s+INCENTIVO', 'antes'),
-            (r'\n\s*F[ÉE]RIAS\s*[-–]\s*PR[ÊE]MIO', 'antes'),
-            (r'\n\s*AFASTAMENTO\s+PRELIMINAR', 'antes'),
-            # 6. Cabeçalho de outra Superintendência (ex: "SRE Metropolitana C\nDiretora:")
-            (r'\n\s*Diretor[ae]?:\s+[A-ZÁÉÍÓÚÂÊÔÃÕÇ]', 'antes'),
-            # 7. Marcador de assinatura digital (rodapé do diário)
-            (r'Documento\s+assinado\s+eletr[ôo]nicamente', 'antes'),
-            # 8. Identificador único do ato (ex: "29 1318018 - 1")
-            (r'\n\s*\d{2}\s+\d{7}\s*-\s*\d', 'antes'),
-        ]
-        melhor_corte = None
-        for padrao, modo in terminadores:
-            # Procura terminador APENAS apos os primeiros 250 chars
-            # Isso evita cortar titulos que tem "SRE -" no inicio (ex: PORTARIA SRE-UBERLANDIA)
-            m = re.search(padrao, texto_portaria[250:])
-            if m:
-                pos_corte = (m.end() if modo == 'incluir' else m.start()) + 250
-                if melhor_corte is None or pos_corte < melhor_corte:
-                    melhor_corte = pos_corte
-        if melhor_corte is not None:
-            texto_portaria = texto_portaria[:melhor_corte].rstrip()
-        
-        # FILTRO: portarias/atos de inspeção escolar têm:
-        #   1. Mencionam "Resolução SEE" ou "artigo 12/13"
-        #   2. Terminam com "SRE –" (com travessão)
-        cabecalho = texto_portaria[:600]
-        tem_resolucao = bool(re.search(
-            r'Resolu[çc][ãa]o\s+SEE|artigo\s+1[236]|art\.?\s*1[236]',
-            cabecalho, re.IGNORECASE
-        ))
-        tem_sre = bool(re.search(r'SRE\s*[–\-]\s*\w', texto_portaria))
-        
-        # Para portarias COM número: também aceita se tiver "PROCESSO N." ou "SEI N."
-        # (essas formas são mais explícitas e existem desde 2023)
-        tem_processo_ou_sei = bool(re.search(
-            r'PROCESSO\s+N[\.\s]*[ºoº°]?|SEI\s+N[\.\s]*[ºoº°]?',
-            cabecalho, re.IGNORECASE
-        ))
-        
-        # Indicadores adicionais de regulação escolar — usados quando
-        # o ato não termina com "SRE –" (caso de atos de turmas em comunidades,
-        # como ocorre em 2022 com "vinculada à Escola Municipal X, em Y").
-        tem_indicadores_escolares = bool(re.search(
-            r'Escola\s+Municipal|Col[ée]gio\s+|Centro\s+Educacional|'
-            r'Centro\s+de\s+Educa[çc][ãa]o|Educa[çc][ãa]o\s+Infantil|'
-            r'Ensino\s+Fundamental|Ensino\s+M[ée]dio|'
-            r'vinculada\s+[àa]\s+Escola|ministrad[oa]\s+pel[oa]\s+(?:Col[ée]gio|Escola)|'
-            r'situad[oa]\s+(?:na|no|[àa])\s+(?:R\.|Av\.|Rua|Avenida|Pra[çc]a)|'
-            r'entidade\s+mantenedora|autoriza[çd][oãa]\w*\s+o\s+funcionamento',
-            texto_portaria, re.IGNORECASE
-        ))
-        
-        # FILTRO ADICIONAL: rejeitar portarias administrativas que tem palavras escolares
-        # mas NAO sao de inspecao escolar (institucao, processos administrativos, etc)
-        eh_administrativa = bool(re.search(
-            r'Institui\s+e\s+nomeia|'
-            r'Comit[êe]\s+(?:Estadual|Intersetorial|Regional|de\s+Busca|Especial)|'
-            r'Comiss[ãa]o\s+de\s+Concilia[çc][ãa]o|'
-            r'Comiss[ãa]o\s+de\s+Processo\s+Administrativo|'
-            r'TERMO\s+DE\s+INSTAURA[ÇC][ÃA]O|'
-            r'Processo\s+Administrativo,\s+nos\s+termos\s+da\s+Lei\s+n[º°o\.]*\s*14\.184|'
-            r'compor[ãa]o\s+a\s+Comiss[ãa]o|'
-            r'instaurado\s+pela\s+Portaria',
-            cabecalho, re.IGNORECASE
-        ))
-        if eh_administrativa:
-            continue
-        
-        if ancora["tipo"] == "portaria":
-            # Portarias com número: precisa de Resolução + (SRE OU Processo/SEI OU indicadores escolares fortes)
-            # O criterio de indicadores e necessario para portarias das SREs locais (formato 2026)
-            # que tem "Resolucao SEE artigo 16" e mencionam escolas/colegios mas nao "SRE -" no fim
-            if not tem_resolucao or not (tem_sre or tem_processo_ou_sei or tem_indicadores_escolares):
-                continue
-            numero = ancora["numero"]
-            ano = ancora["ano"]
-            chave = f"{numero}/{ano}"
-            numero_int = int(numero)
-        else:
-            # Atos sem número: precisa de Resolução + (SRE OU indicadores escolares fortes)
-            # Atos de criação/funcionamento de turmas em comunidades raramente terminam
-            # com "SRE –", mas sempre mencionam "vinculada à Escola Municipal X" ou afins.
-            if not tem_resolucao:
-                continue
-            if not (tem_sre or tem_indicadores_escolares):
-                continue
-            
-            # Atos sem número não têm "ano oficial" próprio — são publicados no
-            # diário e o ano correto é o da publicação. Aqui usamos placeholder
-            # "0000" e a numeração sequencial é absoluta (não agrupada por ano);
-            # parsear_portaria substitui "0000" pelo ano de data_diario depois.
-            ano = "0000"
-            
-            contador_sn["_total"] = contador_sn.get("_total", 0) + 1
-            seq = contador_sn["_total"]
-            chave = f"S/N-{seq:03d}/{ano}"
-            numero_int = None  # banco aceita NULL agora
-        
-        if chave in vistos:
-            continue
-        vistos.add(chave)
-        
-        portarias.append({
-            "numero_completo": chave,
-            "numero": numero_int,
-            "ano": int(ano),
-            "texto": texto_portaria,
-        })
-    
-    # Ordenar: primeiro portarias com número, depois sem número (S/N)
-    def chave_ordenacao(p):
-        eh_sem_numero = p["numero"] is None
-        return (p["ano"], eh_sem_numero, p["numero"] or 0)
-    
-    portarias.sort(key=chave_ordenacao)
-    return portarias
-
-
-def extrair_enderecos(texto: str) -> tuple:
-    match = re.search(
-        r'd[ao]\s+'
-        r'((?:R\.|Rua|Av\.|Avenida|Praça|Pça\.)\s+[^,]+?[\s,]+[\d/]+(?:/\d+)*(?:,\s*[\wÀ-ÿ\.\s]+?)?)'
-        r'(?:,\s*em\s+[A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ\s]+?)?'
-        r',?\s+para\s+(?:a\s+)?'
-        r'((?:R\.|Rua|Av\.|Avenida|Praça|Pça\.)\s+[^,]+?,\s*\d+(?:/\d+)*(?:,\s*[\wÀ-ÿ\.\s]+?)?)'
-        r'(?:,\s*no\s+mesmo|\.|,\s*em\s+[A-Z])',
-        texto, re.IGNORECASE
-    )
-    if match:
-        return match.group(1).strip().rstrip(','), match.group(2).strip().rstrip(',')
-    return None, None
-
-
-def detectar_tipo_acao(texto: str) -> str:
-    txt = texto.lower()
-    if "ficam revogados os atos de autorização" in txt:
-        return "cessacao"
-    if re.search(r'ltda[\w\s\-–\.]+para[\w\s\-–\.]+ltda', txt, re.IGNORECASE):
-        return "mudanca_mantenedora"
-    if "autoriza" in txt and ("funcionamento" in txt or "turma" in txt):
-        return "autorizacao"
-    if re.search(r'funcionamento\s+de\s+\d+\s*\([\w\s]+\)\s*turma', txt):
-        return "autorizacao"
-    if "mudança de denominação do logradouro" in txt or "logradouro" in txt:
-        return "mudanca_logradouro"
-    if "mudança do prédio" in txt or "mudança de prédio" in txt or "mudança de endereço" in txt:
-        return "mudanca_predio"
-
-    enderecos = extrair_enderecos(texto)
-    if enderecos[0] and enderecos[1] and "no mesmo município" in txt:
-        def num_bairro(end):
-            m = re.search(r',\s*([\d/]+)\s*,\s*([\wÀ-ÿ\.\s]+)$', end)
-            return (m.group(1).strip(), m.group(2).strip().lower()) if m else (None, None)
-        n_a, b_a = num_bairro(enderecos[0])
-        n_n, b_n = num_bairro(enderecos[1])
-        if n_a and n_a == n_n and b_a == b_n:
-            return "mudanca_logradouro"
-        return "mudanca_predio"
-    return "outros"
-
-
-def extrair_sre(texto: str) -> Optional[str]:
-    match = re.search(r'SRE\s*[–\-—]\s*([A-ZÁÉÍÓÚÂÊÔÃÕÇa-zÀ-ÿ][\wÀ-ÿ\s]*?)\s*$', texto)
-    return match.group(1).strip() if match else None
-
-
-def extrair_escola(texto: str) -> tuple:
-    padroes = [
-        r'(Escola\s+(?:Municipal\s+|Estadual\s+|Particular\s+)?[A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ\s\-–]+?)(?:,\s*de\s+(Ensino\s+\w+(?:\s+e\s+\w+)?)\s*(?:\(([\wÀ-ÿ\s]+?)\))?|,\s*em\s+|,\s*situad)',
-        r'(Centro\s+Educacional\s+[A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ\s\-]+?),\s*de\s+(Ensino\s+\w+(?:\s+e\s+\w+)?)',
-        r'(Colégio\s+[A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ\s]+?)(?:,|\s+situad)',
-    ]
-    for padrao in padroes:
-        match = re.search(padrao, texto)
-        if match:
-            nome = match.group(1).strip().rstrip(',').strip()
-            etapa = match.group(2).strip() if match.lastindex and match.lastindex >= 2 and match.group(2) else None
-            modalidade = match.group(3).strip() if match.lastindex and match.lastindex >= 3 and match.group(3) else None
-            if not modalidade:
-                m = re.search(r'\(((?:anos\s+iniciais|anos\s+finais|EJA|integral)[^)]*)\)', texto, re.IGNORECASE)
-                if m:
-                    modalidade = m.group(1).strip()
-            return nome, etapa, modalidade
-    return None, None, None
-
-
-def extrair_municipio(texto: str) -> Optional[str]:
-    match = re.search(r'em\s+([A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ]+(?:\s+(?:de|do|da|das|dos)?\s*[A-ZÁÉÍÓÚÂÊÔÃÕÇ]?[\wÀ-ÿ]+){0,4}?)\.\s*SRE', texto)
-    if match:
-        return match.group(1).strip()
-    match = re.search(r'em\s+([A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ]+(?:\s+[A-ZÁÉÍÓÚÂÊÔÃÕÇ]?[\wÀ-ÿ]+){0,3}?)\s+para\s+(?:R\.|Rua|Av\.|Avenida|Praça|a\s+R\.|a\s+Av)', texto)
-    if match:
-        return match.group(1).strip()
-    if "no mesmo município" in texto:
-        match = re.search(r'em\s+([A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ]+(?:\s+[A-ZÁÉÍÓÚÂÊÔÃÕÇ]?[\wÀ-ÿ]+){0,3}?)\s+para', texto)
-        if match:
-            return match.group(1).strip()
-    matches = list(re.finditer(r'em\s+([A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ]+(?:\s+[A-ZÁÉÍÓÚÂÊÔÃÕÇ]?[\wÀ-ÿ]+){0,3}?)[,\.]', texto))
-    if matches:
-        return matches[-1].group(1).strip()
-    return None
-
-
-def extrair_mantenedoras(texto: str) -> tuple:
-    match = re.search(
-        r'(?:de\s+|d[ao]\s+empresa\s+)([A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ\s\-–\.]+?Ltda(?:\s*[–\-]\s*ME)?)\s+para\s+(?:entidade\s+|empresa\s+)?([A-ZÁÉÍÓÚÂÊÔÃÕÇ][\wÀ-ÿ\s\-–\.]+?Ltda(?:\s*[–\-]\s*ME)?)',
-        texto
-    )
-    if match:
-        return match.group(1).strip(), match.group(2).strip()
-    return None, None
-
-
-def extrair_bases_legais(texto: str) -> list:
-    bases = []
-    encontrados = set()
-    padroes = [
-        r'Resolução\s+(?:SEE|CEE|SEPLAG)\s+n[º\.°o]\s*[\d\.]+,\s*de\s+\d+\s+de\s+\w+\s+de\s+\d{4}',
-        r'Portaria\s+(?:SEE|CEE)\s+n[º\.°o]\s*[\d\.]+,\s*de\s+\d+\s+de\s+\w+\s+de\s+\d{4}',
-        r'Lei\s+(?:Complementar\s+)?n[º\.°o]\s*[\d\.]+,\s*de\s+\d+\s+de\s+\w+\s+de\s+\d{4}',
-        r'Decreto\s+n[º\.°o]\s*[\d\.]+,\s*de\s+\d+\s+de\s+\w+\s+de\s+\d{4}',
-        r'Resolução\s+(?:SEE|CEE|SEPLAG)\s+n[º\.°o]\s*[\d\.]+',
-        r'Portaria\s+(?:SEE|CEE)\s+n[º\.°o]\s*[\d\.]+',
-    ]
-    for padrao in padroes:
-        for match in re.finditer(padrao, texto, re.IGNORECASE):
-            base = match.group(0).strip().rstrip(',.')
-            chave = re.sub(r'[\s,].*$', '', base.lower())
-            if chave not in encontrados:
-                encontrados.add(chave)
-                bases.append(base)
-    return bases
-
-
-def extrair_data_diario(nome_arquivo: str, texto_pdf: str, metadata_title: str = "") -> Optional[date]:
-    """Extrai a data do Diário Oficial.
-    
-    Ordem de prioridade:
-    1. Metadata 'title' do PDF — Diários do INFOLEDBH vêm com nome padronizado
-       "Diário_do_Executivo_AAAA-MM-DD.pdf" embutido, MESMO se a usuária
-       renomear o arquivo. Esta é a fonte mais confiável.
-    2. Nome do arquivo — caso a usuária renomeie pra algo com data.
-    3. Texto do PDF — fallback final, busca padrões "DIA-FEIRA, DD DE MES DE AAAA"
-       ou "Belo Horizonte, DD de mês de AAAA". Pode ser impreciso, pois capas
-       de Diários geralmente têm o cabeçalho renderizado como imagem (não texto).
-    """
-    meses = {
-        'janeiro': 1, 'fevereiro': 2, 'março': 3, 'marco': 3, 'abril': 4,
-        'maio': 5, 'junho': 6, 'julho': 7, 'agosto': 8,
-        'setembro': 9, 'outubro': 10, 'novembro': 11, 'dezembro': 12,
-    }
-    
-    # 1) Metadata title — formato "Diário_do_Executivo_AAAA-MM-DD.pdf"
-    if metadata_title:
-        match = re.search(r'(\d{4})[-_](\d{2})[-_](\d{2})', metadata_title)
-        if match:
-            try:
-                return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
-            except ValueError:
-                pass
-        # Tentar formato DD-MM-AAAA também no metadata
-        match = re.search(r'(\d{2})[-_](\d{2})[-_](\d{4})', metadata_title)
-        if match:
-            try:
-                return date(int(match.group(3)), int(match.group(2)), int(match.group(1)))
-            except ValueError:
-                pass
-    
-    # 2) Nome do arquivo
-    match = re.search(r'(\d{4})[-_]?(\d{2})[-_]?(\d{2})', nome_arquivo)
-    if match:
-        try:
-            return date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
-        except ValueError:
-            pass
-    match = re.search(r'(\d{2})[-_](\d{2})[-_](\d{4})', nome_arquivo)
-    if match:
-        try:
-            return date(int(match.group(3)), int(match.group(2)), int(match.group(1)))
-        except ValueError:
-            pass
-    
-    # 3) Texto do PDF — cabeçalho com dia da semana
-    match = re.search(
-        r'(?:SEGUNDA|TER[ÇC]A|QUARTA|QUINTA|SEXTA|S[ÁA]BADO|DOMINGO)[\s\-]*FEIRA?,?\s*(\d{1,2})\s+DE\s+(\w+)\s+DE\s+(\d{4})',
-        texto_pdf, re.IGNORECASE
-    )
-    if match:
-        try:
-            mes = meses.get(match.group(2).lower())
-            if mes:
-                return date(int(match.group(3)), mes, int(match.group(1)))
-        except (ValueError, KeyError):
-            pass
-    # 4) Texto do PDF — "Belo Horizonte, aos DD de mês de AAAA"
-    match = re.search(
-        r'(\d{1,2})\s+DE\s+(janeiro|fevereiro|mar[çc]o|abril|maio|junho|julho|agosto|setembro|outubro|novembro|dezembro)\s+DE\s+(\d{4})',
-        texto_pdf[:10000], re.IGNORECASE
-    )
-    if match:
-        try:
-            mes = meses.get(match.group(2).lower())
-            if mes:
-                return date(int(match.group(3)), mes, int(match.group(1)))
-        except (ValueError, KeyError):
-            pass
-    return None
-
-
-def parsear_portaria(portaria: dict, nome_arquivo: str, pagina, data_diario) -> dict:
-    texto_original = portaria["texto"]
-    texto_norm = normalizar_texto(texto_original)
-    nome_escola, etapa, modalidade = extrair_escola(texto_norm)
-    end_ant, end_novo = extrair_enderecos(texto_norm)
-    mant_ant, mant_nova = extrair_mantenedoras(texto_norm)
-    
-    # Para atos sem número (numero == None), o ano correto é sempre o do
-    # data_diario — atos sem número não têm "ano oficial" próprio. Para
-    # portarias com número (PORTARIA N.º X/AAAA), o ano vem do próprio número.
-    ano = portaria["ano"]
-    numero_completo = portaria["numero_completo"]
-    eh_sem_numero = portaria["numero"] is None
-    
-    if eh_sem_numero and data_diario:
-        ano = data_diario.year
-        # Substitui o placeholder "0000" pelo ano real do diário
-        numero_completo = numero_completo.replace("/0000", f"/{ano}")
-    elif ano == 0 and data_diario:
-        # Fallback geral
-        ano = data_diario.year
-        numero_completo = numero_completo.replace("/0000", f"/{ano}")
-    
-    return {
-        "numero_portaria": portaria["numero"],
-        "ano": ano,
-        "numero_completo": numero_completo,
-        "tipo_acao": detectar_tipo_acao(texto_norm),
-        "escola_nome": nome_escola,
-        "escola_etapa": etapa,
-        "escola_modalidade": modalidade,
-        "municipio": extrair_municipio(texto_norm),
-        "sre": extrair_sre(texto_norm),
-        "endereco_anterior": end_ant,
-        "endereco_novo": end_novo,
-        "mantenedora_anterior": mant_ant,
-        "mantenedora_nova": mant_nova,
-        "bases_legais": extrair_bases_legais(texto_norm) or None,
-        "data_diario": data_diario.isoformat() if data_diario else None,
-        "nome_arquivo_pdf": nome_arquivo,
-        "pagina_pdf": pagina,
-        "texto_completo": texto_original,
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Extrator de Portarias — Diário Oficial MG</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,400;9..144,500;9..144,600;9..144,700&family=JetBrains+Mono:wght@400;500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --ink: #1a1814;
+      --paper: #f4f0e8;
+      --paper-dark: #e8e2d4;
+      --accent: #a02c2c;
+      --accent-soft: #c44545;
+      --gold: #b8924f;
+      --green: #4a6741;
+      --amber: #c98a2e;
+      --rule: #2a2620;
+      --muted: #6b6457;
+      --shadow: 0 4px 12px rgba(26, 24, 20, 0.08);
     }
 
+    * { box-sizing: border-box; margin: 0; padding: 0; }
 
-class handler(BaseHTTPRequestHandler):
-    def _cors_headers(self):
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+    body {
+      font-family: 'Inter', sans-serif;
+      background: var(--paper);
+      background-image:
+        repeating-linear-gradient(0deg, transparent, transparent 28px, rgba(26, 24, 20, 0.025) 28px, rgba(26, 24, 20, 0.025) 29px),
+        radial-gradient(circle at 20% 10%, rgba(184, 146, 79, 0.06) 0%, transparent 40%),
+        radial-gradient(circle at 80% 60%, rgba(160, 44, 44, 0.04) 0%, transparent 40%);
+      color: var(--ink);
+      min-height: 100vh;
+      padding: 40px 20px;
+    }
 
-    def do_OPTIONS(self):
-        self.send_response(204)
-        self._cors_headers()
-        self.end_headers()
+    .container {
+      max-width: 1100px;
+      margin: 0 auto;
+    }
 
-    def _json_response(self, status, data):
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self._cors_headers()
-        self.end_headers()
-        self.wfile.write(json.dumps(data, ensure_ascii=False, default=str).encode("utf-8"))
+    .masthead {
+      border-top: 4px double var(--ink);
+      border-bottom: 4px double var(--ink);
+      padding: 32px 0 24px;
+      margin-bottom: 48px;
+      text-align: center;
+      position: relative;
+    }
 
-    def do_POST(self):
-        try:
-            if not SUPABASE_URL or not SUPABASE_KEY:
-                return self._json_response(500, {
-                    "error": "SUPABASE_URL e SUPABASE_SERVICE_KEY não configuradas"
-                })
+    .masthead::before, .masthead::after {
+      content: "";
+      position: absolute;
+      left: 0; right: 0;
+      height: 1px;
+      background: var(--ink);
+    }
+    .masthead::before { top: 7px; }
+    .masthead::after { bottom: 7px; }
 
-            content_length = int(self.headers.get("Content-Length", 0))
-            if content_length == 0:
-                return self._json_response(400, {"error": "Body vazio"})
+    .masthead-meta {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 18px;
+      padding: 0 8px;
+    }
 
-            body = self.rfile.read(content_length)
-            try:
-                payload = json.loads(body)
-            except json.JSONDecodeError:
-                return self._json_response(400, {"error": "JSON inválido"})
+    .masthead h1 {
+      font-family: 'Fraunces', serif;
+      font-weight: 600;
+      font-size: clamp(2.5rem, 6vw, 4.5rem);
+      line-height: 1;
+      letter-spacing: -0.02em;
+      margin-bottom: 8px;
+      font-variation-settings: "opsz" 144;
+    }
 
-            storage_path = payload.get("storage_path")
-            nome_arquivo = payload.get("nome_arquivo", storage_path)
+    .masthead h1 em {
+      font-style: italic;
+      font-weight: 500;
+      color: var(--accent);
+    }
 
-            if not storage_path:
-                return self._json_response(400, {"error": "storage_path é obrigatório"})
+    .masthead-sub {
+      font-family: 'Fraunces', serif;
+      font-style: italic;
+      font-size: 1.1rem;
+      color: var(--muted);
+      letter-spacing: 0.02em;
+    }
 
-            # Conecta no Supabase e baixa o arquivo do Storage
-            supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    .upload-section { margin-bottom: 32px; }
 
-            try:
-                pdf_bytes = supabase.storage.from_(BUCKET_NAME).download(storage_path)
-            except Exception as e:
-                return self._json_response(500, {
-                    "error": f"Erro ao baixar do Storage: {str(e)[:200]}"
-                })
+    /* === Menu de Abas === */
+    .tabs {
+      display: flex;
+      gap: 0;
+      margin: 32px 0 40px;
+      border-bottom: 1px solid var(--rule);
+      position: relative;
+    }
+    .tab {
+      background: none;
+      border: none;
+      padding: 14px 28px;
+      font-family: 'Fraunces', serif;
+      font-size: 18px;
+      font-weight: 500;
+      color: var(--muted);
+      cursor: pointer;
+      position: relative;
+      transition: color 0.2s;
+      letter-spacing: 0.01em;
+    }
+    .tab:hover {
+      color: var(--ink);
+    }
+    .tab.active {
+      color: var(--accent);
+    }
+    .tab.active::after {
+      content: "";
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: -1px;
+      height: 2px;
+      background: var(--accent);
+    }
+    .tab-count {
+      display: inline-block;
+      margin-left: 8px;
+      background: var(--rule);
+      color: var(--muted);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 2px 8px;
+      border-radius: 999px;
+      vertical-align: middle;
+      letter-spacing: 0;
+    }
+    .tab.active .tab-count {
+      background: var(--accent);
+      color: var(--paper);
+    }
 
-            # Salva temp file (PyMuPDF precisa de path)
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp:
-                tmp.write(pdf_bytes)
-                tmp_path = tmp.name
+    /* === Views (mostra/esconde) === */
+    .view {
+      display: none;
+    }
+    .view.active {
+      display: block;
+    }
 
-            try:
-                texto, paginas, metadata_title = extrair_texto_pdf(tmp_path)
-            finally:
-                try:
-                    os.unlink(tmp_path)
-                except OSError:
-                    pass
+    /* === Sub-tabs (dentro de Escolas) === */
+    .sub-tabs {
+      display: flex;
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    .sub-tab {
+      background: none;
+      border: 1px solid var(--rule);
+      padding: 8px 16px;
+      font-family: 'Inter', sans-serif;
+      font-size: 13px;
+      font-weight: 500;
+      color: var(--muted);
+      cursor: pointer;
+      border-radius: 999px;
+      transition: all 0.2s;
+    }
+    .sub-tab:hover {
+      color: var(--ink);
+      border-color: var(--ink);
+    }
+    .sub-tab.active {
+      background: var(--ink);
+      color: var(--paper);
+      border-color: var(--ink);
+    }
 
-            data_diario = extrair_data_diario(nome_arquivo, texto, metadata_title)
-            texto_secao, pagina_secao = localizar_secao(texto, paginas)
+    /* === Cards de Escola === */
+    .escolas-list {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    .escola-card {
+      background: var(--paper);
+      border: 1px solid var(--rule);
+      border-left: 3px solid var(--gold);
+      padding: 20px 24px;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .escola-card:hover {
+      border-color: var(--ink);
+      box-shadow: 0 2px 12px rgba(0,0,0,0.04);
+    }
+    .escola-card[data-verificar="true"] {
+      border-left-color: var(--amber);
+    }
+    .escola-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      margin-bottom: 8px;
+    }
+    .escola-nome {
+      font-family: 'Fraunces', serif;
+      font-size: 18px;
+      font-weight: 500;
+      color: var(--ink);
+      line-height: 1.3;
+      flex: 1;
+    }
+    .escola-nome em {
+      color: var(--muted);
+      font-style: italic;
+      font-weight: 400;
+    }
+    .escola-badge {
+      background: var(--accent);
+      color: var(--paper);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      font-weight: 600;
+      padding: 4px 10px;
+      border-radius: 999px;
+      white-space: nowrap;
+      letter-spacing: 0.02em;
+    }
+    .escola-meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 16px 24px;
+      margin-bottom: 12px;
+      font-family: 'Inter', sans-serif;
+      font-size: 13px;
+      color: var(--muted);
+    }
+    .escola-meta-item strong {
+      color: var(--ink);
+      font-weight: 500;
+    }
+    .escola-toggle {
+      background: none;
+      border: none;
+      color: var(--accent);
+      font-family: 'Inter', sans-serif;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      padding: 4px 0;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      margin-top: 4px;
+    }
+    .escola-toggle:hover { text-decoration: underline; }
+    .escola-toggle .caret {
+      transition: transform 0.2s;
+      display: inline-block;
+      font-size: 10px;
+    }
+    .escola-card[data-expanded="true"] .escola-toggle .caret {
+      transform: rotate(90deg);
+    }
+    .escola-portarias {
+      max-height: 0;
+      overflow: hidden;
+      transition: max-height 0.3s ease;
+      margin-top: 0;
+    }
+    .escola-card[data-expanded="true"] .escola-portarias {
+      max-height: 8000px;
+      margin-top: 16px;
+      padding-top: 16px;
+      border-top: 1px dashed var(--rule);
+    }
+    .escola-portaria-item {
+      padding: 10px 0;
+      border-bottom: 1px dotted var(--rule);
+      font-family: 'Inter', sans-serif;
+      font-size: 13px;
+    }
+    .escola-portaria-item:last-child { border-bottom: none; }
+    .escola-portaria-numero {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      font-weight: 600;
+      color: var(--accent);
+      margin-right: 10px;
+    }
+    .escola-portaria-tipo {
+      display: inline-block;
+      font-size: 11px;
+      padding: 2px 8px;
+      background: var(--cream);
+      border-radius: 999px;
+      color: var(--muted);
+      margin-right: 10px;
+    }
+    .escola-portaria-data {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: var(--muted);
+    }
+    .escola-empty {
+      text-align: center;
+      padding: 60px 20px;
+      color: var(--muted);
+      font-family: 'Fraunces', serif;
+      font-size: 16px;
+      font-style: italic;
+    }
 
-            # texto_secao agora retorna o texto completo do PDF.
-            # A filtragem de portarias é feita por padrão em quebrar_em_portarias.
-            portarias_brutas = quebrar_em_portarias(texto_secao or "")
-            
-            if not portarias_brutas:
-                return self._json_response(200, {
-                    "arquivo": nome_arquivo,
-                    "secao_encontrada": False,
-                    "portarias_extraidas": 0,
-                    "portarias_inseridas": 0,
-                    "portarias": [],
-                    "mensagem": "Nenhuma portaria de Inspeção Escolar encontrada neste PDF",
-                })
+    .section-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
 
-            # Verificar se este diário (data) já foi processado anteriormente
-            ja_processado_qtd = 0
-            if data_diario:
-                try:
-                    existentes = supabase.table("portarias_inspecao") \
-                        .select("id", count="exact") \
-                        .eq("data_diario", data_diario.isoformat()) \
-                        .limit(1) \
-                        .execute()
-                    ja_processado_qtd = existentes.count or 0
-                except Exception:
-                    pass
+    .section-label::before {
+      content: "";
+      width: 24px;
+      height: 1px;
+      background: var(--ink);
+    }
 
-            portarias = [parsear_portaria(p, nome_arquivo, pagina_secao, data_diario) for p in portarias_brutas]
+    .dropzone {
+      border: 2px dashed var(--rule);
+      background: rgba(255, 255, 255, 0.4);
+      border-radius: 4px;
+      padding: 60px 32px;
+      text-align: center;
+      cursor: pointer;
+      transition: all 0.25s ease;
+    }
 
-            inseridas = 0
-            duplicadas = 0
-            erros = []
-            for p in portarias:
-                try:
-                    supabase.table("portarias_inspecao").insert(p).execute()
-                    inseridas += 1
-                except Exception as e:
-                    msg = str(e)
-                    if "duplicate" in msg.lower() or "unique" in msg.lower():
-                        duplicadas += 1
-                    else:
-                        erros.append({"portaria": p["numero_completo"], "erro": msg[:200]})
+    .dropzone:hover {
+      border-color: var(--accent);
+      background: rgba(255, 255, 255, 0.7);
+    }
 
-            return self._json_response(200, {
-                "arquivo": nome_arquivo,
-                "secao_encontrada": True,
-                "pagina": pagina_secao,
-                "data_diario": data_diario.isoformat() if data_diario else None,
-                "portarias_extraidas": len(portarias),
-                "portarias_inseridas": inseridas,
-                "portarias_duplicadas": duplicadas,
-                "ja_existiam_no_banco": ja_processado_qtd,
-                "erros": erros,
-                "portarias": [
-                    {
-                        "numero_completo": p["numero_completo"],
-                        "tipo_acao": p["tipo_acao"],
-                        "escola_nome": p["escola_nome"],
-                        "escola_etapa": p["escola_etapa"],
-                        "municipio": p["municipio"],
-                        "sre": p["sre"],
-                        "endereco_anterior": p["endereco_anterior"],
-                        "endereco_novo": p["endereco_novo"],
-                        "mantenedora_anterior": p["mantenedora_anterior"],
-                        "mantenedora_nova": p["mantenedora_nova"],
-                        "texto_completo": p["texto_completo"],
-                    }
-                    for p in portarias
-                ],
-            })
+    .dropzone.drag-active {
+      border-color: var(--accent);
+      background: rgba(196, 69, 69, 0.05);
+      transform: scale(1.005);
+    }
 
-        except Exception as e:
-            import traceback
-            return self._json_response(500, {
-                "error": str(e),
-                "trace": traceback.format_exc()[:1000],
-            })
+    .dropzone-icon {
+      width: 56px;
+      height: 56px;
+      margin: 0 auto 20px;
+      stroke: var(--ink);
+      stroke-width: 1.2;
+      fill: none;
+      transition: transform 0.3s ease, stroke 0.3s ease;
+    }
+
+    .dropzone:hover .dropzone-icon,
+    .dropzone.drag-active .dropzone-icon {
+      transform: translateY(-4px);
+      stroke: var(--accent);
+    }
+
+    .dropzone-title {
+      font-family: 'Fraunces', serif;
+      font-size: 1.6rem;
+      font-weight: 500;
+      margin-bottom: 8px;
+    }
+
+    .dropzone-hint {
+      font-size: 0.9rem;
+      color: var(--muted);
+      margin-bottom: 20px;
+    }
+
+    .dropzone-button {
+      display: inline-block;
+      background: var(--ink);
+      color: var(--paper);
+      padding: 12px 28px;
+      border: none;
+      border-radius: 2px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .dropzone-button:hover {
+      background: var(--accent);
+      transform: translateY(-1px);
+      box-shadow: var(--shadow);
+    }
+
+    #file-input { display: none; }
+
+    .file-list {
+      margin-top: 24px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .file-item {
+      background: rgba(255, 255, 255, 0.6);
+      border: 1px solid var(--paper-dark);
+      border-radius: 3px;
+      padding: 16px 20px;
+      display: grid;
+      grid-template-columns: auto 1fr auto auto;
+      align-items: center;
+      gap: 16px;
+      transition: all 0.2s ease;
+    }
+
+    .file-item.uploading,
+    .file-item.processing {
+      border-color: var(--amber);
+      background: rgba(201, 138, 46, 0.05);
+    }
+
+    .file-item.success {
+      border-color: var(--green);
+      background: rgba(74, 103, 65, 0.05);
+    }
+
+    .file-item.error {
+      border-color: var(--accent);
+      background: rgba(160, 44, 44, 0.05);
+    }
+
+    .file-icon {
+      width: 32px;
+      height: 32px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: var(--paper);
+      border: 1px solid var(--rule);
+      border-radius: 2px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      font-weight: 600;
+      flex-shrink: 0;
+    }
+
+    .file-item.uploading .file-icon,
+    .file-item.processing .file-icon {
+      animation: pulse 1.5s ease infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.5; }
+    }
+
+    .file-info { min-width: 0; }
+
+    .file-name {
+      font-family: 'Fraunces', serif;
+      font-size: 1rem;
+      font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-bottom: 2px;
+    }
+
+    .file-meta {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .file-status {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      letter-spacing: 0.15em;
+      text-transform: uppercase;
+      padding: 4px 10px;
+      border-radius: 2px;
+    }
+
+    .file-status.pending { color: var(--muted); border: 1px solid var(--paper-dark); }
+    .file-status.uploading { color: var(--amber); border: 1px solid var(--amber); }
+    .file-status.processing { color: var(--amber); border: 1px solid var(--amber); }
+    .file-status.success { color: var(--green); border: 1px solid var(--green); }
+    .file-status.error { color: var(--accent); border: 1px solid var(--accent); }
+
+    .file-remove {
+      background: none;
+      border: 1px solid var(--paper-dark);
+      width: 28px;
+      height: 28px;
+      border-radius: 2px;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--muted);
+      transition: all 0.2s ease;
+    }
+
+    .file-remove:hover {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
+
+    .file-remove:disabled {
+      opacity: 0.3;
+      cursor: not-allowed;
+    }
+
+    .actions {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-top: 24px;
+      padding: 20px 0;
+      border-top: 1px solid var(--paper-dark);
+    }
+
+    .actions-summary {
+      font-family: 'Fraunces', serif;
+      font-style: italic;
+      color: var(--muted);
+    }
+
+    .actions-summary strong {
+      color: var(--ink);
+      font-style: normal;
+      font-weight: 600;
+    }
+
+    .btn-primary {
+      background: var(--accent);
+      color: var(--paper);
+      border: none;
+      padding: 14px 32px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      cursor: pointer;
+      border-radius: 2px;
+      transition: all 0.2s ease;
+    }
+
+    .btn-primary:hover:not(:disabled) {
+      background: var(--accent-soft);
+      transform: translateY(-1px);
+      box-shadow: 0 6px 16px rgba(160, 44, 44, 0.2);
+    }
+
+    .btn-primary:disabled {
+      background: var(--muted);
+      cursor: not-allowed;
+      opacity: 0.5;
+    }
+
+    .results-section { margin-top: 56px; display: none; }
+    .results-section.active { display: block; }
+
+    .results-header {
+      border-top: 2px solid var(--ink);
+      padding-top: 24px;
+      margin-bottom: 24px;
+    }
+
+    .results-title {
+      font-family: 'Fraunces', serif;
+      font-size: 2rem;
+      font-weight: 500;
+      margin-bottom: 4px;
+    }
+
+    .results-subtitle {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 16px;
+      margin-bottom: 32px;
+    }
+
+    .stat-card {
+      background: rgba(255, 255, 255, 0.6);
+      border: 1px solid var(--paper-dark);
+      padding: 20px;
+      border-radius: 3px;
+    }
+
+    .stat-card.accent {
+      border-color: var(--accent);
+      background: rgba(160, 44, 44, 0.03);
+    }
+
+    .stat-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+
+    .stat-value {
+      font-family: 'Fraunces', serif;
+      font-size: 2.4rem;
+      font-weight: 600;
+      line-height: 1;
+      color: var(--ink);
+      font-variation-settings: "opsz" 144;
+    }
+
+    .stat-value.accent { color: var(--accent); }
+
+    .portarias-list { display: flex; flex-direction: column; gap: 16px; }
+
+    .portaria-card {
+      background: rgba(255, 255, 255, 0.5);
+      border: 1px solid var(--paper-dark);
+      border-left: 3px solid var(--ink);
+      padding: 20px 24px;
+      border-radius: 2px;
+    }
+
+    .portaria-card[data-tipo="cessacao"] { border-left-color: var(--accent); }
+    .portaria-card[data-tipo="autorizacao"] { border-left-color: var(--green); }
+    .portaria-card[data-tipo="mudanca_logradouro"],
+    .portaria-card[data-tipo="mudanca_predio"] { border-left-color: var(--gold); }
+    .portaria-card[data-tipo="mudanca_mantenedora"] { border-left-color: var(--amber); }
+
+    .portaria-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-bottom: 12px;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .portaria-numero {
+      font-family: 'Fraunces', serif;
+      font-size: 1.3rem;
+      font-weight: 600;
+    }
+
+    .portaria-tipo {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      padding: 4px 8px;
+      background: var(--paper-dark);
+      border-radius: 2px;
+      color: var(--ink);
+    }
+
+    .portaria-escola {
+      font-family: 'Fraunces', serif;
+      font-size: 1.05rem;
+      font-style: italic;
+      margin-bottom: 12px;
+    }
+
+    .portaria-meta {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+      gap: 8px;
+      font-size: 0.85rem;
+    }
+
+    .meta-item { display: flex; flex-direction: column; gap: 2px; }
+
+    .meta-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 9px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .portaria-toggle {
+      margin-top: 16px;
+      padding-top: 14px;
+      border-top: 1px dashed var(--paper-dark);
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: none;
+      border-bottom: none;
+      border-left: none;
+      border-right: none;
+      cursor: pointer;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--muted);
+      padding-left: 0;
+      padding-right: 0;
+      transition: color 0.2s;
+      width: 100%;
+      justify-content: flex-start;
+    }
+
+    .portaria-toggle:hover { color: var(--accent); }
+
+    .portaria-toggle .caret {
+      display: inline-block;
+      transition: transform 0.2s;
+      font-size: 9px;
+    }
+
+    .portaria-card[data-expanded="true"] .portaria-toggle .caret {
+      transform: rotate(90deg);
+    }
+
+    .portaria-texto {
+      display: none;
+      margin-top: 14px;
+      padding: 16px 18px;
+      background: rgba(255, 252, 245, 0.65);
+      border: 1px solid var(--paper-dark);
+      border-radius: 2px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      line-height: 1.7;
+      color: var(--ink);
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      max-height: 420px;
+      overflow-y: auto;
+    }
+
+    .portaria-card[data-expanded="true"] .portaria-texto {
+      display: block;
+    }
+
+    .meta-value { font-weight: 500; }
+
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: var(--ink);
+      color: var(--paper);
+      padding: 14px 24px;
+      border-radius: 3px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px;
+      letter-spacing: 0.1em;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.2);
+      transform: translateY(150%);
+      transition: transform 0.3s ease;
+      z-index: 100;
+    }
+
+    .toast.show { transform: translateY(0); }
+    .toast.error { background: var(--accent); }
+    .toast.success { background: var(--green); }
+
+    .footer {
+      margin-top: 80px;
+      padding-top: 24px;
+      border-top: 1px solid var(--paper-dark);
+      text-align: center;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      letter-spacing: 0.2em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    @media (max-width: 640px) {
+      body { padding: 20px 12px; }
+      .file-item { grid-template-columns: auto 1fr; grid-template-rows: auto auto; }
+      .file-status, .file-remove { grid-column: 2; justify-self: end; }
+      .actions { flex-direction: column; gap: 16px; align-items: stretch; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+
+    <header class="masthead">
+      <div class="masthead-meta">
+        <span id="data-hoje">—</span>
+        <span>EDIÇÃO DIGITAL · MINAS GERAIS</span>
+        <span>EXTRAÇÃO AUTOMÁTICA</span>
+      </div>
+      <h1>Extrator de <em>Portarias</em></h1>
+      <p class="masthead-sub">Assessoria de Inspeção Escolar — Diário Oficial</p>
+    </header>
+
+    <!-- Menu de Abas -->
+    <nav class="tabs">
+      <button class="tab active" data-tab="painel" onclick="trocarAba('painel')">
+        Painel
+      </button>
+      <button class="tab" data-tab="extracao" onclick="trocarAba('extracao')">
+        Extração
+      </button>
+      <button class="tab" data-tab="escolas" onclick="trocarAba('escolas')">
+        Escolas <span class="tab-count" id="tab-count-escolas">0</span>
+      </button>
+      <button class="tab" data-tab="buscar" onclick="trocarAba('buscar')">
+        Buscar
+      </button>
+      <button class="tab" data-tab="formato-novo" onclick="trocarAba('formato-novo')">
+        Formato Novo
+      </button>
+    </nav>
+
+    <!-- View: Painel (TELA PRINCIPAL DE TRABALHO) -->
+    <div class="view active" id="view-painel">
+      <h2 class="view-title">Painel de Acompanhamento</h2>
+      <p class="view-subtitle">Status de vigência de cursos e etapas por escola</p>
+
+      <!-- Cards de resumo por status -->
+      <div id="painel-cards" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-top: 24px; margin-bottom: 24px;">
+        <div style="padding: 30px; text-align: center; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--muted); grid-column: 1 / -1;">Carregando...</div>
+      </div>
+
+      <!-- Painel de filtros -->
+      <div style="padding: 18px 20px; background: var(--cream); border: 1px solid var(--rule); margin-bottom: 20px;">
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 12px;">
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;">Status</label>
+            <select id="pn-status" onchange="painelBuscar()" style="width: 100%; padding: 8px 10px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);">
+              <option value="todos">Todos</option>
+              <option value="urgente_3_meses">⚡ URGENTE (3 meses)</option>
+              <option value="alerta_6_meses">⚠ Alerta (6 meses)</option>
+              <option value="atencao_10_meses">⚠ Atenção (10 meses)</option>
+              <option value="ativo">✓ Ativo</option>
+              <option value="vencido_recente">✗ Vencido (recente)</option>
+              <option value="vencido_mais_6_meses">✗ Vencido +6 meses</option>
+              <option value="vencido_mais_1_ano">✗ Vencido +1 ano</option>
+              <option value="cessado">○ Cessado</option>
+              <option value="sem_vencimento">– Sem vencimento</option>
+            </select>
+          </div>
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;">Tipo</label>
+            <select id="pn-tipo" onchange="painelBuscar()" style="width: 100%; padding: 8px 10px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);">
+              <option value="ambos">Cursos + Etapas</option>
+              <option value="cursos">Só Cursos</option>
+              <option value="etapas">Só Etapas</option>
+            </select>
+          </div>
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;">Escola</label>
+            <input type="text" id="pn-escola" placeholder="Nome da escola..." oninput="painelBuscarDebounced()" style="width: 100%; padding: 8px 10px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);">
+          </div>
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;">Município</label>
+            <input type="text" id="pn-municipio" placeholder="Cidade..." oninput="painelBuscarDebounced()" style="width: 100%; padding: 8px 10px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);">
+          </div>
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;">SRE</label>
+            <input type="text" id="pn-sre" placeholder="Superintendência..." oninput="painelBuscarDebounced()" style="width: 100%; padding: 8px 10px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);">
+          </div>
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;">Curso</label>
+            <input type="text" id="pn-curso" placeholder="Nome do curso..." oninput="painelBuscarDebounced()" style="width: 100%; padding: 8px 10px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);">
+          </div>
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;">Etapa</label>
+            <input type="text" id="pn-etapa" placeholder="Etapa de ensino..." oninput="painelBuscarDebounced()" style="width: 100%; padding: 8px 10px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);">
+          </div>
+        </div>
+
+        <!-- Filtro: Dependência Administrativa (multi-seleção) -->
+        <div style="margin-bottom: 14px;">
+          <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em;">Dependência Administrativa</label>
+          <div id="pn-dependencia-pills" style="display: flex; flex-wrap: wrap; gap: 6px;">
+            <button type="button" data-valor="" onclick="painelTogglePill('dependencia', this)" class="pn-pill pn-pill-todos pn-pill-ativo" style="padding: 5px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">Todos</button>
+            <button type="button" data-valor="ESTADUAL"  onclick="painelTogglePill('dependencia', this)" class="pn-pill" style="padding: 5px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">ESTADUAL</button>
+            <button type="button" data-valor="FEDERAL"   onclick="painelTogglePill('dependencia', this)" class="pn-pill" style="padding: 5px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">FEDERAL</button>
+            <button type="button" data-valor="MUNICIPAL" onclick="painelTogglePill('dependencia', this)" class="pn-pill" style="padding: 5px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">MUNICIPAL</button>
+            <button type="button" data-valor="PRIVADA"   onclick="painelTogglePill('dependencia', this)" class="pn-pill" style="padding: 5px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">PRIVADA</button>
+          </div>
+        </div>
+
+        <!-- Filtro: Nível de Ensino (multi-seleção) -->
+        <div style="margin-bottom: 14px;">
+          <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em;">Nível de Ensino</label>
+          <div id="pn-nivel-pills" style="display: flex; flex-wrap: wrap; gap: 6px;">
+            <button type="button" data-valor="" onclick="painelTogglePill('nivel', this)" class="pn-pill pn-pill-todos pn-pill-ativo" style="padding: 5px 14px; border: 1px solid var(--ink); background: var(--ink); color: var(--paper); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">Todos</button>
+            <button type="button" data-valor="Educação Infantil"   onclick="painelTogglePill('nivel', this)" class="pn-pill" style="padding: 5px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">Educação Infantil</button>
+            <button type="button" data-valor="Ensino Fundamental"  onclick="painelTogglePill('nivel', this)" class="pn-pill" style="padding: 5px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">Ensino Fundamental</button>
+            <button type="button" data-valor="Ensino Médio"        onclick="painelTogglePill('nivel', this)" class="pn-pill" style="padding: 5px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">Ensino Médio</button>
+            <button type="button" data-valor="Nível Técnico"       onclick="painelTogglePill('nivel', this)" class="pn-pill" style="padding: 5px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">Nível Técnico</button>
+            <button type="button" data-valor="EJA"                 onclick="painelTogglePill('nivel', this)" class="pn-pill" style="padding: 5px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">EJA</button>
+            <button type="button" data-valor="Curso Inicial"       onclick="painelTogglePill('nivel', this)" class="pn-pill" style="padding: 5px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">Curso Inicial</button>
+            <button type="button" data-valor="Curso Intermediário" onclick="painelTogglePill('nivel', this)" class="pn-pill" style="padding: 5px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">Curso Intermediário</button>
+            <button type="button" data-valor="Outros"              onclick="painelTogglePill('nivel', this)" class="pn-pill" style="padding: 5px 14px; border: 1px solid var(--rule); background: var(--paper); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;">Outros</button>
+          </div>
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+          <div id="pn-resumo" style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted);">—</div>
+          <button onclick="painelLimparFiltros()" style="background: none; border: 1px solid var(--rule); padding: 6px 14px; font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer; color: var(--ink);">Limpar filtros</button>
+        </div>
+      </div>
+
+      <!-- Lista de escolas -->
+      <div id="pn-lista" style="display: flex; flex-direction: column; gap: 12px;"></div>
+
+      <div id="pn-status-msg" style="text-align: center; padding: 30px; color: var(--muted); font-family: 'Inter', sans-serif; font-size: 13px;"></div>
+    </div><!-- /view-painel -->
+
+    <!-- View: Extração -->
+    <div class="view" id="view-extracao">
+    <section class="upload-section">
+      <p class="section-label">Inserir Documentos</p>
+
+      <div class="dropzone" id="dropzone">
+        <svg class="dropzone-icon" viewBox="0 0 64 64">
+          <path d="M16 40v8a4 4 0 0 0 4 4h24a4 4 0 0 0 4-4v-8" />
+          <path d="M32 12v28" />
+          <path d="M22 22l10-10 10 10" />
+        </svg>
+        <p class="dropzone-title">Arraste os PDFs do diário aqui</p>
+        <p class="dropzone-hint">ou clique no botão para selecionar arquivos · até 50MB cada</p>
+        <button class="dropzone-button" type="button" id="select-btn">
+          Selecionar PDFs
+        </button>
+        <input type="file" id="file-input" accept="application/pdf,.pdf" multiple />
+      </div>
+
+      <div class="file-list" id="file-list"></div>
+
+      <div class="actions" id="actions" style="display: none;">
+        <p class="actions-summary" id="summary">
+          <strong>0</strong> arquivos selecionados
+        </p>
+        <button class="btn-primary" id="process-btn" disabled>
+          Processar Diários
+        </button>
+      </div>
+    </section>
+
+    <section class="results-section" id="results">
+      <div class="results-header">
+        <h2 class="results-title">Portarias Extraídas</h2>
+        <p class="results-subtitle">Inseridas no Banco de Dados</p>
+      </div>
+
+      <div class="stats-grid" id="stats-grid"></div>
+
+      <!-- Painel de filtros -->
+      <div id="extracao-filtros" style="margin-bottom: 20px; padding: 18px 20px; background: var(--cream); border: 1px solid var(--rule);">
+        <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin-bottom: 12px;">
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;">Buscar</label>
+            <input type="text" id="filtro-busca" placeholder="Nº, escola, município..." oninput="aplicarFiltros()" style="width: 100%; padding: 8px 10px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);">
+          </div>
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;">Ano</label>
+            <select id="filtro-ano" onchange="aplicarFiltros()" style="width: 100%; padding: 8px 10px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);">
+              <option value="">Todos</option>
+            </select>
+          </div>
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;">Tipo de Ato</label>
+            <select id="filtro-ato" onchange="aplicarFiltros()" style="width: 100%; padding: 8px 10px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);">
+              <option value="">Todos</option>
+            </select>
+          </div>
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;">SRE</label>
+            <select id="filtro-sre" onchange="aplicarFiltros()" style="width: 100%; padding: 8px 10px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);">
+              <option value="">Todas</option>
+            </select>
+          </div>
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--ink); margin-bottom: 4px; text-transform: uppercase; letter-spacing: 0.05em;">Ordenar por</label>
+            <select id="filtro-ordem" onchange="aplicarFiltros()" style="width: 100%; padding: 8px 10px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);">
+              <option value="data_desc">Data do diário (mais recente)</option>
+              <option value="data_asc">Data do diário (mais antiga)</option>
+              <option value="numero_desc">Nº portaria (maior)</option>
+              <option value="numero_asc">Nº portaria (menor)</option>
+              <option value="vencimento_asc">Vencimento (mais próximo)</option>
+              <option value="vencimento_desc">Vencimento (mais distante)</option>
+              <option value="escola_asc">Escola (A-Z)</option>
+            </select>
+          </div>
+        </div>
+        <div style="display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+          <div id="filtro-resumo" style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted);">—</div>
+          <button onclick="limparFiltrosExtracao()" style="background: none; border: 1px solid var(--rule); padding: 6px 14px; font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer; color: var(--ink);">Limpar filtros</button>
+        </div>
+      </div>
+
+      <div class="portarias-list" id="portarias-list"></div>
+    </section>
+    </div><!-- /view-extracao -->
+
+    <!-- View: Escolas -->
+    <div class="view" id="view-escolas">
+      <div class="results-header">
+        <h2 class="results-title">Escolas</h2>
+        <p class="results-subtitle">Portarias agrupadas por estabelecimento</p>
+      </div>
+
+      <div class="sub-tabs">
+        <button class="sub-tab active" data-subtab="identificadas" onclick="trocarSubAba('identificadas')">
+          Identificadas <span id="sub-count-identificadas">0</span>
+        </button>
+        <button class="sub-tab" data-subtab="verificar" onclick="trocarSubAba('verificar')">
+          Verificar <span id="sub-count-verificar">0</span>
+        </button>
+      </div>
+
+      <div class="escolas-list" id="escolas-list-identificadas"></div>
+      <div id="escolas-verificar-wrapper" style="display: none;">
+        <div id="ia-controls" style="margin-bottom: 24px; padding: 20px; background: var(--cream); border: 1px solid var(--rule);">
+          <div style="margin-bottom: 16px;">
+            <strong style="display: block; margin-bottom: 4px; font-family: 'Fraunces', serif; font-size: 16px;">Análise por IA</strong>
+            <span style="font-family: 'Inter', sans-serif; font-size: 13px; color: var(--muted);">A análise dispara automaticamente quando você processa um diário novo. Use os botões abaixo se quiser forçar uma atualização. Roda em segundo plano — pode fechar o browser.</span>
+          </div>
+          <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px;">
+            <button class="btn-primary" id="btn-atualizar-pendentes" onclick="atualizarPendentes()" style="white-space: nowrap;" title="Analisa as portarias novas que ainda nao foram tocadas pela IA">
+              Atualizar pendentes <span id="contador-pendentes" style="font-family:'JetBrains Mono',monospace;opacity:.7;margin-left:4px;"></span>
+            </button>
+            <button onclick="atualizarNovosCampos()" id="btn-atualizar-novos" style="background: none; border: 1px solid var(--ink); padding: 10px 18px; font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 500; cursor: pointer; color: var(--ink); white-space: nowrap;" title="Re-analisa portarias antigas que estao com campos faltando do esquema novo">
+              Atualizar novos campos <span id="contador-novos-campos" style="font-family:'JetBrains Mono',monospace;opacity:.7;margin-left:4px;"></span>
+            </button>
+            <button onclick="atualizarTudoIA()" id="btn-atualizar-tudo" style="background: none; border: 1px solid var(--accent); padding: 10px 18px; font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 500; cursor: pointer; color: var(--accent); white-space: nowrap;" title="Apaga TODOS os campos IA e refaz tudo do zero">
+              Atualizar tudo (refazer)
+            </button>
+            <button onclick="verificarProgresso()" style="background: none; border: 1px solid var(--rule); padding: 10px 18px; font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 500; cursor: pointer; color: var(--ink); white-space: nowrap;" title="Recarrega a tela com os dados atuais do banco">
+              Atualizar lista
+            </button>
+          </div>
+          <!-- Painel de progresso da IA -->
+          <div style="margin-top: 12px; padding: 14px 16px; background: var(--paper); border: 1px solid var(--rule);">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+              <span style="font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 600; color: var(--ink);">Progresso da análise</span>
+              <span id="progresso-pct" style="font-family: 'JetBrains Mono', monospace; font-size: 13px; color: var(--accent); font-weight: 700;">–%</span>
+            </div>
+            <div style="height: 8px; background: var(--rule); border-radius: 999px; overflow: hidden; margin-bottom: 8px;">
+              <div id="progresso-barra" style="height: 100%; background: var(--accent); width: 0%; transition: width 0.6s ease;"></div>
+            </div>
+            <div style="display: flex; justify-content: space-between; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted);">
+              <span id="progresso-texto">Carregando progresso...</span>
+              <span id="progresso-ultima">última análise: –</span>
+            </div>
+          </div>
+        </div>
+        <div id="ia-progresso" style="display: none; margin-bottom: 24px; padding: 16px 20px; background: var(--paper); border: 1px solid var(--accent);">
+          <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+            <span style="font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);">
+              <strong id="ia-status">Analisando...</strong>
+              <span id="ia-contador" style="color: var(--muted); margin-left: 8px;">0 / 0</span>
+            </span>
+            <button onclick="pararBuscaIA()" id="btn-parar-ia" style="background: none; border: 1px solid var(--rule); padding: 4px 12px; font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer; color: var(--muted);">Pausar</button>
+          </div>
+          <div style="height: 6px; background: var(--rule); border-radius: 999px; overflow: hidden;">
+            <div id="ia-barra" style="height: 100%; background: var(--accent); width: 0%; transition: width 0.3s;"></div>
+          </div>
+          <div id="ia-log" style="margin-top: 12px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); max-height: 100px; overflow-y: auto;"></div>
+        </div>
+        <div class="escolas-list" id="escolas-list-verificar"></div>
+      </div>
+    </div><!-- /view-escolas -->
+
+    <!-- View: Buscar -->
+    <div class="view" id="view-buscar">
+      <h2 class="view-title">Buscar escolas</h2>
+      <p class="view-subtitle">Filtre por curso, etapa, escola, município e situação</p>
+
+      <div style="margin-top: 24px; padding: 24px; background: var(--cream); border: 1px solid var(--rule);">
+        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 12px; font-weight: 600; color: var(--ink); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em;">Curso</label>
+            <input type="text" id="busca-curso" placeholder="ex: Radiologia, Enfermagem..." style="width: 100%; padding: 10px 12px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 14px; color: var(--ink);">
+          </div>
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 12px; font-weight: 600; color: var(--ink); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em;">Etapa de Ensino</label>
+            <input type="text" id="busca-etapa" placeholder="ex: Ensino Médio, EJA..." style="width: 100%; padding: 10px 12px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 14px; color: var(--ink);">
+          </div>
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 12px; font-weight: 600; color: var(--ink); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em;">Escola</label>
+            <input type="text" id="busca-escola" placeholder="Nome da escola" style="width: 100%; padding: 10px 12px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 14px; color: var(--ink);">
+          </div>
+          <div>
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 12px; font-weight: 600; color: var(--ink); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em;">Município</label>
+            <input type="text" id="busca-municipio" placeholder="Nome do município" style="width: 100%; padding: 10px 12px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 14px; color: var(--ink);">
+          </div>
+          <div style="grid-column: 1 / -1;">
+            <label style="display: block; font-family: 'Inter', sans-serif; font-size: 12px; font-weight: 600; color: var(--ink); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em;">Situação</label>
+            <select id="busca-situacao" style="width: 100%; padding: 10px 12px; border: 1px solid var(--rule); background: var(--paper); font-family: 'Inter', sans-serif; font-size: 14px; color: var(--ink);">
+              <option value="todas">Todas</option>
+              <option value="ativo">Ativos (vigência em dia)</option>
+              <option value="vencido">Vencidos</option>
+              <option value="cessado">Cessados / Encerrados</option>
+              <option value="sem_vencimento">Sem data de vencimento</option>
+            </select>
+          </div>
+        </div>
+        <div style="display: flex; gap: 8px; margin-top: 18px; flex-wrap: wrap;">
+          <button class="btn-primary" onclick="executarBusca()" style="white-space: nowrap;">Buscar</button>
+          <button onclick="limparBusca()" style="background: none; border: 1px solid var(--rule); padding: 10px 18px; font-family: 'Inter', sans-serif; font-size: 13px; font-weight: 500; cursor: pointer; color: var(--ink);">Limpar filtros</button>
+        </div>
+      </div>
+
+      <!-- Resumo de resultados -->
+      <div id="busca-resumo" style="margin-top: 24px; display: none; padding: 14px 16px; background: var(--paper); border: 1px solid var(--rule); font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--muted);"></div>
+
+      <!-- Resultados -->
+      <div id="busca-resultados" style="margin-top: 16px;"></div>
+    </div><!-- /view-buscar -->
+
+    <!-- View: Formato Novo -->
+    <div class="view" id="view-formato-novo">
+      <h2 class="view-title">Detectar formato novo</h2>
+      <p class="view-subtitle">Suba PDFs de um ano novo e a IA verifica se o sistema atual consegue processar — sem salvar no banco</p>
+
+      <div style="margin-top: 24px; padding: 20px; background: var(--cream); border: 1px solid var(--rule);">
+        <p style="font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink); margin-bottom: 12px;">
+          <strong>Como funciona:</strong>
+        </p>
+        <ol style="font-family: 'Inter', sans-serif; font-size: 13px; color: var(--muted); padding-left: 20px; line-height: 1.7; margin-bottom: 16px;">
+          <li>Você seleciona um PDF de um diário oficial (preferencialmente do ano novo que quer testar)</li>
+          <li>O sistema extrai apenas a seção "Assessoria de Inspeção Escolar" (sem salvar no banco)</li>
+          <li>A IA Claude analisa o trecho e te diz se o formato é compatível</li>
+          <li>Se houver mudança, copie o relatório e me mande para ajustar o código</li>
+        </ol>
+
+        <input type="file" id="fn-input" accept="application/pdf,.pdf" style="display: none;" />
+        <button class="btn-primary" onclick="document.getElementById('fn-input').click()" style="white-space: nowrap;">
+          Selecionar PDF para análise
+        </button>
+        <span id="fn-arquivo" style="margin-left: 12px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--muted);"></span>
+      </div>
+
+      <!-- Status -->
+      <div id="fn-status" style="margin-top: 16px; display: none; padding: 14px 16px; background: var(--paper); border: 1px solid var(--rule); font-family: 'JetBrains Mono', monospace; font-size: 12px;"></div>
+
+      <!-- Resultado da análise -->
+      <div id="fn-resultado" style="margin-top: 16px;"></div>
+    </div><!-- /view-formato-novo -->
+
+
+    <footer class="footer">
+      Pacto Educacional · Sistema de Extração de Portarias · 2026
+    </footer>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <!-- Supabase JS Client (CDN) -->
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+
+  <script>
+    // ============================================================
+    // CONFIGURAÇÃO - obtida da API /api/config (env vars)
+    // ============================================================
+    const BUCKET = 'diarios';
+    const API_ENDPOINT = '/api/processar';
+    const MAX_FILE_SIZE = 50 * 1024 * 1024; // 50MB
+    // Edge functions do Supabase (deployadas diretamente, sem passar pelo Vercel)
+    const SUPABASE_FN = 'https://vczwlfcfrlvyzabwievl.supabase.co/functions/v1';
+    // ============================================================
+
+    let sb = null; // será inicializado após buscar config
+    let SUPABASE_URL = '';
+    let SUPABASE_ANON_KEY = '';
+    let selectedFiles = [];
+    let allPortarias = [];
+
+    // Inicializa o Supabase client buscando config da API
+    async function initSupabase() {
+      try {
+        const res = await fetch('/api/config');
+        const cfg = await res.json();
+        if (!cfg.supabase_url || !cfg.supabase_anon_key) {
+          throw new Error('Config incompleta: faltam env vars no Vercel');
+        }
+        const { createClient } = supabase;
+        SUPABASE_URL = cfg.supabase_url;
+        SUPABASE_ANON_KEY = cfg.supabase_anon_key;
+        sb = createClient(cfg.supabase_url, cfg.supabase_anon_key);
+        return true;
+      } catch (err) {
+        showToast(`Erro ao carregar config: ${err.message}`, 'error');
+        return false;
+      }
+    }
+
+    async function carregarHistorico() {
+      try {
+        // Usa a edge function do Supabase que retorna id + campos IA
+        const res = await fetch(`${SUPABASE_FN}/listar-portarias`);
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+        const data = await res.json();
+        if (data.portarias && data.portarias.length > 0) {
+          allPortarias = data.portarias;
+          renderResults();
+          showToast(`${data.portarias.length} portarias carregadas do histórico`, 'success');
+        }
+      } catch (err) {
+        console.warn('Não foi possível carregar histórico:', err.message);
+      }
+    }
+
+    // Data atual
+    const meses = ['JAN', 'FEV', 'MAR', 'ABR', 'MAI', 'JUN', 'JUL', 'AGO', 'SET', 'OUT', 'NOV', 'DEZ'];
+    const hoje = new Date();
+    document.getElementById('data-hoje').textContent =
+      `${String(hoje.getDate()).padStart(2, '0')} ${meses[hoje.getMonth()]} ${hoje.getFullYear()}`;
+
+    // Drag & Drop
+    const dropzone = document.getElementById('dropzone');
+    const fileInput = document.getElementById('file-input');
+    const selectBtn = document.getElementById('select-btn');
+
+    selectBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      fileInput.click();
+    });
+
+    dropzone.addEventListener('click', () => fileInput.click());
+    fileInput.addEventListener('change', (e) => handleFiles(e.target.files));
+
+    ['dragenter', 'dragover'].forEach(ev =>
+      dropzone.addEventListener(ev, (e) => {
+        e.preventDefault();
+        dropzone.classList.add('drag-active');
+      })
+    );
+
+    ['dragleave', 'drop'].forEach(ev =>
+      dropzone.addEventListener(ev, (e) => {
+        e.preventDefault();
+        if (ev === 'drop' || !dropzone.contains(e.relatedTarget)) {
+          dropzone.classList.remove('drag-active');
+        }
+      })
+    );
+
+    dropzone.addEventListener('drop', (e) => handleFiles(e.dataTransfer.files));
+
+    function handleFiles(files) {
+      const novos = Array.from(files).filter(f => {
+        if (f.type !== 'application/pdf' && !f.name.toLowerCase().endsWith('.pdf')) {
+          showToast(`${f.name} não é PDF — ignorado`, 'error');
+          return false;
+        }
+        if (f.size > MAX_FILE_SIZE) {
+          showToast(`${f.name} é muito grande (>50MB) — ignorado`, 'error');
+          return false;
+        }
+        if (selectedFiles.find(s => s.file.name === f.name && s.file.size === f.size)) {
+          return false;
+        }
+        return true;
+      });
+
+      novos.forEach(file => {
+        selectedFiles.push({
+          id: crypto.randomUUID(),
+          file,
+          status: 'pending',
+          result: null,
+        });
+      });
+
+      renderFileList();
+    }
+
+    function renderFileList() {
+      const list = document.getElementById('file-list');
+      const actions = document.getElementById('actions');
+      const summary = document.getElementById('summary');
+      const processBtn = document.getElementById('process-btn');
+
+      list.innerHTML = '';
+
+      if (selectedFiles.length === 0) {
+        actions.style.display = 'none';
+        return;
+      }
+
+      actions.style.display = 'flex';
+      summary.innerHTML = `<strong>${selectedFiles.length}</strong> arquivo${selectedFiles.length > 1 ? 's' : ''} selecionado${selectedFiles.length > 1 ? 's' : ''}`;
+
+      const pendentes = selectedFiles.filter(s => s.status === 'pending').length;
+      processBtn.disabled = pendentes === 0;
+      processBtn.textContent = pendentes > 0
+        ? `Processar ${pendentes} ${pendentes === 1 ? 'Diário' : 'Diários'}`
+        : 'Processado';
+
+      selectedFiles.forEach(item => {
+        const div = document.createElement('div');
+        div.className = `file-item ${item.status}`;
+        div.dataset.id = item.id;
+
+        const sizeMB = (item.file.size / (1024 * 1024)).toFixed(2);
+        const sizeStr = `${sizeMB} MB`;
+
+        let statusSucesso = `${item.result?.portarias_inseridas || 0} portarias`;
+        const dup = item.result?.portarias_duplicadas || 0;
+        const jaExistiam = item.result?.ja_existiam_no_banco || 0;
+        if (dup > 0 && (item.result?.portarias_inseridas || 0) === 0) {
+          statusSucesso = `Já processado`;
+        } else if (dup > 0) {
+          statusSucesso = `${item.result.portarias_inseridas} novas, ${dup} já existiam`;
+        }
+
+        const statusText = {
+          pending: 'Aguardando',
+          uploading: 'Enviando',
+          processing: 'Processando',
+          success: statusSucesso,
+          error: 'Erro',
+        }[item.status];
+
+        const isDisabled = item.status === 'uploading' || item.status === 'processing';
+
+        div.innerHTML = `
+          <div class="file-icon">PDF</div>
+          <div class="file-info">
+            <p class="file-name">${item.file.name}</p>
+            <p class="file-meta">${sizeStr}${item.result?.error ? ' · ' + item.result.error : ''}</p>
+          </div>
+          <span class="file-status ${item.status}">${statusText}</span>
+          <button class="file-remove" data-remove="${item.id}" ${isDisabled ? 'disabled' : ''}>×</button>
+        `;
+        list.appendChild(div);
+      });
+
+      list.querySelectorAll('[data-remove]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const id = btn.dataset.remove;
+          selectedFiles = selectedFiles.filter(s => s.id !== id);
+          renderFileList();
+        });
+      });
+    }
+
+    // Processamento: upload pro Storage + chamada à API
+    document.getElementById('process-btn').addEventListener('click', async () => {
+      if (!sb) {
+        showToast('Aguardando config...', 'error');
+        const ok = await initSupabase();
+        if (!ok) return;
+      }
+
+      const pendentes = selectedFiles.filter(s => s.status === 'pending');
+      if (pendentes.length === 0) return;
+
+      document.getElementById('process-btn').disabled = true;
+
+      for (const item of pendentes) {
+        try {
+          // 1. Upload pro Supabase Storage
+          item.status = 'uploading';
+          renderFileList();
+
+          // Gera path único: timestamp_nomearquivo
+          const timestamp = Date.now();
+          const safeName = item.file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+          const storagePath = `${timestamp}_${safeName}`;
+
+          const { error: uploadError } = await sb.storage
+            .from(BUCKET)
+            .upload(storagePath, item.file, {
+              contentType: 'application/pdf',
+              upsert: false,
+            });
+
+          if (uploadError) {
+            throw new Error(`Upload: ${uploadError.message}`);
+          }
+
+          // 2. Chama a API pra processar
+          item.status = 'processing';
+          renderFileList();
+
+          const response = await fetch(API_ENDPOINT, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              storage_path: storagePath,
+              nome_arquivo: item.file.name,
+            }),
+          });
+
+          const data = await response.json();
+
+          if (!response.ok) {
+            throw new Error(data.error || 'Erro no servidor');
+          }
+
+          item.status = 'success';
+          item.result = data;
+        } catch (err) {
+          item.status = 'error';
+          item.result = { error: err.message };
+          showToast(`${item.file.name}: ${err.message}`, 'error');
+        }
+
+        renderFileList();
+      }
+
+      // Após processar tudo, recarrega o histórico completo do banco
+      // (garante que tudo aparece sem duplicar)
+      allPortarias = [];
+      await carregarHistorico();
+      showToast('Processamento concluído', 'success');
+    });
+
+    let portariasFiltradas = [];
+
+    function popularSelectsFiltros() {
+      // Popular ano com base em data_diario ou ano da portaria
+      const anos = new Set();
+      const atos = new Set();
+      const sres = new Set();
+      allPortarias.forEach(p => {
+        if (p.data_diario) anos.add(p.data_diario.slice(0, 4));
+        else if (p.ano) anos.add(String(p.ano));
+        if (p.ato_descricao_ia) atos.add(p.ato_descricao_ia);
+        if (p.sre) sres.add(p.sre);
+      });
+
+      const selAno = document.getElementById('filtro-ano');
+      const valAtual = selAno.value;
+      selAno.innerHTML = '<option value="">Todos</option>' +
+        Array.from(anos).sort((a,b) => b.localeCompare(a))
+          .map(a => `<option value="${a}">${a}</option>`).join('');
+      selAno.value = valAtual;
+
+      const selAto = document.getElementById('filtro-ato');
+      const valAto = selAto.value;
+      selAto.innerHTML = '<option value="">Todos</option>' +
+        Array.from(atos).sort()
+          .map(a => `<option value="${escapeHtml(a)}">${escapeHtml(a)}</option>`).join('');
+      selAto.value = valAto;
+
+      const selSre = document.getElementById('filtro-sre');
+      const valSre = selSre.value;
+      selSre.innerHTML = '<option value="">Todas</option>' +
+        Array.from(sres).sort()
+          .map(s => `<option value="${escapeHtml(s)}">${escapeHtml(s)}</option>`).join('');
+      selSre.value = valSre;
+    }
+
+    function aplicarFiltros() {
+      const txtBusca = (document.getElementById('filtro-busca').value || '').toLowerCase().trim();
+      const filtroAno = document.getElementById('filtro-ano').value;
+      const filtroAto = document.getElementById('filtro-ato').value;
+      const filtroSre = document.getElementById('filtro-sre').value;
+      const ordem     = document.getElementById('filtro-ordem').value;
+
+      portariasFiltradas = allPortarias.filter(p => {
+        if (filtroAno) {
+          const anoP = (p.data_diario || '').slice(0, 4) || String(p.ano || '');
+          if (anoP !== filtroAno) return false;
+        }
+        if (filtroAto && p.ato_descricao_ia !== filtroAto) return false;
+        if (filtroSre && p.sre !== filtroSre) return false;
+        if (txtBusca) {
+          const blob = [
+            p.numero_completo, p.escola_nome, p.escola_nome_ia,
+            p.municipio, p.sre, p.ato_descricao_ia, p.curso_ia,
+            p.etapa_ensino_ia, p.texto_completo
+          ].filter(Boolean).join(' ').toLowerCase();
+          if (!blob.includes(txtBusca)) return false;
+        }
+        return true;
+      });
+
+      const sortFn = {
+        data_desc: (a,b) => (b.data_diario||'').localeCompare(a.data_diario||''),
+        data_asc:  (a,b) => (a.data_diario||'').localeCompare(b.data_diario||''),
+        numero_desc: (a,b) => (parseInt(b.numero_portaria)||0) - (parseInt(a.numero_portaria)||0),
+        numero_asc:  (a,b) => (parseInt(a.numero_portaria)||0) - (parseInt(b.numero_portaria)||0),
+        vencimento_asc: (a,b) => {
+          const av = a.data_vencimento_ia || '9999-12-31';
+          const bv = b.data_vencimento_ia || '9999-12-31';
+          return av.localeCompare(bv);
+        },
+        vencimento_desc: (a,b) => {
+          const av = a.data_vencimento_ia || '0000-01-01';
+          const bv = b.data_vencimento_ia || '0000-01-01';
+          return bv.localeCompare(av);
+        },
+        escola_asc: (a,b) => (a.escola_nome_ia||a.escola_nome||'').localeCompare(b.escola_nome_ia||b.escola_nome||''),
+      }[ordem];
+      if (sortFn) portariasFiltradas.sort(sortFn);
+
+      // Resumo
+      const resumo = document.getElementById('filtro-resumo');
+      if (portariasFiltradas.length === allPortarias.length) {
+        resumo.textContent = `Mostrando todas as ${allPortarias.length} portarias`;
+      } else {
+        resumo.textContent = `Mostrando ${portariasFiltradas.length} de ${allPortarias.length} portarias`;
+      }
+
+      renderListaPortarias();
+    }
+
+    function limparFiltrosExtracao() {
+      document.getElementById('filtro-busca').value = '';
+      document.getElementById('filtro-ano').value = '';
+      document.getElementById('filtro-ato').value = '';
+      document.getElementById('filtro-sre').value = '';
+      document.getElementById('filtro-ordem').value = 'data_desc';
+      aplicarFiltros();
+    }
+
+    function renderResults() {
+      if (allPortarias.length === 0) return;
+
+      const section = document.getElementById('results');
+      section.classList.add('active');
+
+      const tipoLabels = {
+        mudanca_logradouro: 'Mudança Logradouro',
+        cessacao: 'Cessação',
+        autorizacao: 'Autorização',
+        mudanca_mantenedora: 'Mudança Mantenedora',
+        mudanca_predio: 'Mudança Prédio',
+        outros: 'Outros',
+      };
+
+      // Stats
+      const stats = {};
+      allPortarias.forEach(p => {
+        stats[p.tipo_acao] = (stats[p.tipo_acao] || 0) + 1;
+      });
+      const statsGrid = document.getElementById('stats-grid');
+      statsGrid.innerHTML = `
+        <div class="stat-card accent">
+          <p class="stat-label">Total</p>
+          <p class="stat-value accent">${allPortarias.length}</p>
+        </div>
+        ${Object.entries(stats).map(([tipo, count]) => `
+          <div class="stat-card">
+            <p class="stat-label">${tipoLabels[tipo] || tipo}</p>
+            <p class="stat-value">${count}</p>
+          </div>
+        `).join('')}
+      `;
+
+      popularSelectsFiltros();
+      aplicarFiltros();
+    }
+
+    function renderListaPortarias() {
+      const tipoLabels = {
+        mudanca_logradouro: 'Mudança Logradouro',
+        cessacao: 'Cessação',
+        autorizacao: 'Autorização',
+        mudanca_mantenedora: 'Mudança Mantenedora',
+        mudanca_predio: 'Mudança Prédio',
+        outros: 'Outros',
+      };
+      const list = document.getElementById('portarias-list');
+      if (portariasFiltradas.length === 0) {
+        list.innerHTML = '<p style="text-align:center;padding:40px;color:var(--muted);font-family:Inter,sans-serif;">Nenhuma portaria corresponde aos filtros aplicados.</p>';
+        return;
+      }
+      list.innerHTML = portariasFiltradas.map((p, idx) => `
+        <article class="portaria-card" data-tipo="${p.tipo_acao}" data-expanded="false" id="portaria-${idx}">
+          <div class="portaria-header">
+            <span class="portaria-numero">Portaria ${p.numero_completo}</span>
+            <span class="portaria-tipo">${tipoLabels[p.tipo_acao] || p.tipo_acao}</span>
+          </div>
+          ${(p.escola_nome || p.escola_nome_ia) ? `<p class="portaria-escola">${escapeHtml(p.escola_nome || p.escola_nome_ia)}${p.escola_nome_ia && !p.escola_nome ? ' <span style="font-size:11px;color:var(--gold);font-style:italic;">(IA)</span>' : ''}</p>` : ''}
+          <div class="portaria-meta">
+            ${p.ato_descricao_ia ? `<div class="meta-item"><span class="meta-label">Ato</span><span class="meta-value">${escapeHtml(p.ato_descricao_ia)}</span></div>` : ''}
+            ${p.data_diario ? `<div class="meta-item"><span class="meta-label">Data do Diário</span><span class="meta-value">${formatarData(p.data_diario)}</span></div>` : ''}
+            ${p.data_inicio_vigencia_ia ? `<div class="meta-item"><span class="meta-label">Início da Vigência</span><span class="meta-value">${formatarData(p.data_inicio_vigencia_ia)}</span></div>` : ''}
+            ${p.data_vencimento_ia ? `<div class="meta-item"><span class="meta-label">Vencimento</span><span class="meta-value">${formatarData(p.data_vencimento_ia)}</span></div>` : ''}
+            ${p.prazo_ia ? `<div class="meta-item"><span class="meta-label">Prazo</span><span class="meta-value">${escapeHtml(p.prazo_ia)}</span></div>` : ''}
+            ${p.municipio ? `<div class="meta-item"><span class="meta-label">Município</span><span class="meta-value">${p.municipio}</span></div>` : ''}
+            ${p.sre ? `<div class="meta-item"><span class="meta-label">SRE</span><span class="meta-value">${p.sre}</span></div>` : ''}
+            ${(p.escola_etapa || p.etapa_ensino_ia) ? `<div class="meta-item"><span class="meta-label">Etapa</span><span class="meta-value">${escapeHtml(p.escola_etapa || p.etapa_ensino_ia)}</span></div>` : ''}
+            ${p.curso_ia ? `<div class="meta-item"><span class="meta-label">Curso</span><span class="meta-value">${escapeHtml(p.curso_ia)}</span></div>` : ''}
+            ${p.qualificacoes_ia ? `<div class="meta-item"><span class="meta-label">Qualificações</span><span class="meta-value">${escapeHtml(p.qualificacoes_ia)}</span></div>` : ''}
+            ${p.parecer_cee_ia ? `<div class="meta-item"><span class="meta-label">Parecer CEE</span><span class="meta-value">${escapeHtml(p.parecer_cee_ia)}</span></div>` : ''}
+            ${p.arquivo ? `<div class="meta-item"><span class="meta-label">Arquivo</span><span class="meta-value">${p.arquivo}</span></div>` : ''}
+          </div>
+          ${p.resumo_ia ? `<p style="margin-top: 12px; font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink); padding: 10px 14px; background: var(--cream); border-left: 2px solid var(--gold); font-style: italic;">${escapeHtml(p.resumo_ia)}</p>` : ''}
+          ${p.observacoes_ia ? `<p style="margin-top: 8px; font-family: 'Inter', sans-serif; font-size: 12px; color: var(--muted);"><strong style="color:var(--ink);">Observações:</strong> ${escapeHtml(p.observacoes_ia)}</p>` : ''}
+          ${p.texto_completo ? `
+            <button class="portaria-toggle" onclick="togglePortaria(${idx})">
+              <span class="caret">▶</span>
+              <span class="toggle-label">Ver texto completo</span>
+            </button>
+            <pre class="portaria-texto">${escapeHtml(p.texto_completo)}</pre>
+          ` : ''}
+        </article>
+      `).join('');
+
+      // Atualiza também a view de Escolas (contadores e listas)
+      renderEscolas();
+    }
+
+    function togglePortaria(idx) {
+      const card = document.getElementById(`portaria-${idx}`);
+      if (!card) return;
+      const isExpanded = card.getAttribute('data-expanded') === 'true';
+      card.setAttribute('data-expanded', String(!isExpanded));
+      const label = card.querySelector('.toggle-label');
+      if (label) label.textContent = isExpanded ? 'Ver texto completo' : 'Ocultar texto completo';
+    }
+
+    function escapeHtml(str) {
+      if (!str) return '';
+      return String(str)
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&#039;');
+    }
+
+    function formatarData(iso) {
+      // Recebe "2022-01-20" e retorna "20/01/2022"
+      if (!iso) return '';
+      const partes = String(iso).split('-');
+      if (partes.length !== 3) return iso;
+      return `${partes[2]}/${partes[1]}/${partes[0]}`;
+    }
+
+    function showToast(msg, type = 'success') {
+      const toast = document.getElementById('toast');
+      toast.textContent = msg;
+      toast.className = `toast show ${type}`;
+      setTimeout(() => toast.classList.remove('show'), 3500);
+    }
+
+    // === MENU DE ABAS ===
+    function trocarAba(nome) {
+      document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+      document.querySelectorAll('.view').forEach(v => v.classList.remove('active'));
+      document.querySelector(`.tab[data-tab="${nome}"]`).classList.add('active');
+      document.getElementById(`view-${nome}`).classList.add('active');
+      // Se for Escolas, garantir que está renderizado e atualizar progresso
+      if (nome === 'escolas') {
+        renderEscolas();
+        atualizarProgressoIA();
+      }
+      // Se for Painel, carregar dados (só na primeira vez)
+      if (nome === 'painel' && !window._painelCarregado) {
+        window._painelCarregado = true;
+        painelBuscar();
+      }
+    }
+
+    function trocarSubAba(nome) {
+      document.querySelectorAll('.sub-tab').forEach(t => t.classList.remove('active'));
+      document.querySelector(`.sub-tab[data-subtab="${nome}"]`).classList.add('active');
+      document.getElementById('escolas-list-identificadas').style.display =
+        nome === 'identificadas' ? 'flex' : 'none';
+      document.getElementById('escolas-verificar-wrapper').style.display =
+        nome === 'verificar' ? 'block' : 'none';
+    }
+
+    // === RENDERIZAÇÃO DE ESCOLAS ===
+    function renderEscolas() {
+      // Agrupar portarias por nome de escola (regex OU IA, normalizado: trim + lowercase)
+      const grupos = {};      // chave: nome normalizado → {nome_display, portarias[], sre, municipio}
+      const verificar = [];   // portarias sem nome em ambos os campos
+
+      for (const p of allPortarias) {
+        // Preferir nome da IA se houver, senão usa o regex
+        const nome = (p.escola_nome || p.escola_nome_ia || '').trim();
+        if (!nome) {
+          verificar.push(p);
+          continue;
+        }
+        const chave = nome.toLowerCase();
+        if (!grupos[chave]) {
+          grupos[chave] = {
+            nome_display: nome,
+            portarias: [],
+            sres: new Set(),
+            municipios: new Set(),
+            etapas: new Set(),
+          };
+        }
+        grupos[chave].portarias.push(p);
+        if (p.sre) grupos[chave].sres.add(p.sre);
+        if (p.municipio) grupos[chave].municipios.add(p.municipio);
+        // Etapa: regex OU IA
+        const etapa = p.escola_etapa || p.etapa_ensino_ia;
+        if (etapa) grupos[chave].etapas.add(etapa);
+      }
+
+      // Ordenar escolas por nome
+      const listaEscolas = Object.values(grupos).sort((a, b) =>
+        a.nome_display.localeCompare(b.nome_display, 'pt-BR')
+      );
+
+      // Atualizar contadores
+      const totalEscolas = listaEscolas.length + (verificar.length > 0 ? 1 : 0);
+      document.getElementById('tab-count-escolas').textContent = totalEscolas;
+      document.getElementById('sub-count-identificadas').textContent = listaEscolas.length;
+      document.getElementById('sub-count-verificar').textContent = verificar.length;
+
+      // === Lista IDENTIFICADAS ===
+      const elIdent = document.getElementById('escolas-list-identificadas');
+      if (listaEscolas.length === 0) {
+        elIdent.innerHTML = '<div class="escola-empty">Nenhuma escola identificada ainda. Processe um diário na aba Extração.</div>';
+      } else {
+        elIdent.innerHTML = listaEscolas.map((g, idx) => renderEscolaCard(g, `ident-${idx}`)).join('');
+      }
+
+      // === Lista VERIFICAR ===
+      const elVerif = document.getElementById('escolas-list-verificar');
+      if (verificar.length === 0) {
+        elVerif.innerHTML = '<div class="escola-empty">Nenhuma portaria pendente de verificação. ✓</div>';
+      } else {
+        // Agrupar "verificar" como um único bloco com todas as portarias
+        const grupoVerif = {
+          nome_display: 'Sem nome de escola identificado',
+          portarias: verificar,
+          sres: new Set(verificar.map(p => p.sre).filter(Boolean)),
+          municipios: new Set(verificar.map(p => p.municipio).filter(Boolean)),
+          etapas: new Set(),
+          verificar: true,
+        };
+        elVerif.innerHTML = renderEscolaCard(grupoVerif, 'verif-0');
+      }
+    }
+
+    function renderEscolaCard(g, cardId) {
+      const tipoLabels = {
+        mudanca_logradouro: 'Mudança Logradouro',
+        cessacao: 'Cessação',
+        autorizacao: 'Autorização',
+        mudanca_mantenedora: 'Mudança Mantenedora',
+        mudanca_predio: 'Mudança Prédio',
+        outros: 'Outros',
+      };
+
+      const sresList = Array.from(g.sres).join(', ');
+      const munList = Array.from(g.municipios).join(', ');
+      const etapasList = Array.from(g.etapas).join(', ');
+      const qtd = g.portarias.length;
+
+      const verificarAttr = g.verificar ? 'data-verificar="true"' : '';
+      const nomeDisplay = g.verificar
+        ? `<em>${escapeHtml(g.nome_display)}</em>`
+        : escapeHtml(g.nome_display);
+
+      // Listar portarias dessa escola — cada uma com texto completo expansível
+      const portariasHtml = g.portarias
+        .slice()
+        .sort((a, b) => (b.data_diario || '').localeCompare(a.data_diario || ''))
+        .map((p, pi) => {
+          const pId = `ep-${cardId}-${pi}`;
+          return `
+          <div class="escola-portaria-item" id="${pId}">
+            <div class="escola-portaria-cabecalho" onclick="toggleEscolaPortaria('${pId}')" style="cursor:pointer; display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+              <span class="caret" style="font-size:10px; transition:transform 0.2s; display:inline-block;">▶</span>
+              <span class="escola-portaria-numero">${escapeHtml(p.numero_completo || '?')}</span>
+              <span class="escola-portaria-tipo">${tipoLabels[p.tipo_acao] || p.tipo_acao || '?'}</span>
+              <span class="escola-portaria-data">${formatarData(p.data_diario) || '—'}</span>
+              ${p.municipio ? `<span style="font-size:12px;color:var(--muted);">${escapeHtml(p.municipio)}${p.sre ? ' · ' + escapeHtml(p.sre) : ''}</span>` : ''}
+            </div>
+            ${p.texto_completo ? `
+              <pre class="escola-portaria-texto" style="display:none; margin-top:12px; white-space:pre-wrap; font-family:'JetBrains Mono',monospace; font-size:12px; line-height:1.6; color:var(--ink); background:var(--cream); border:1px solid var(--rule); padding:14px 16px; overflow:auto;">${escapeHtml(p.texto_completo)}</pre>
+            ` : ''}
+          </div>`;
+        }).join('');
+
+      return `
+        <article class="escola-card" id="escola-${cardId}" data-expanded="false" ${verificarAttr}>
+          <div class="escola-header">
+            <h3 class="escola-nome">${nomeDisplay}</h3>
+            <span class="escola-badge">${qtd} ${qtd === 1 ? 'portaria' : 'portarias'}</span>
+          </div>
+          <div class="escola-meta">
+            ${sresList ? `<div class="escola-meta-item"><strong>SRE:</strong> ${escapeHtml(sresList)}</div>` : ''}
+            ${munList ? `<div class="escola-meta-item"><strong>Município:</strong> ${escapeHtml(munList)}</div>` : ''}
+            ${etapasList ? `<div class="escola-meta-item"><strong>Etapa:</strong> ${escapeHtml(etapasList)}</div>` : ''}
+          </div>
+          <button class="escola-toggle" onclick="toggleEscola('${cardId}')">
+            <span class="caret">▶</span>
+            <span>Ver portarias (${qtd})</span>
+          </button>
+          <div class="escola-portarias">
+            ${portariasHtml}
+          </div>
+        </article>
+      `;
+    }
+
+    function toggleEscola(cardId) {
+      const card = document.getElementById(`escola-${cardId}`);
+      if (!card) return;
+      const isExpanded = card.getAttribute('data-expanded') === 'true';
+      card.setAttribute('data-expanded', String(!isExpanded));
+    }
+
+    function toggleEscolaPortaria(pId) {
+      const item = document.getElementById(pId);
+      if (!item) return;
+      const texto = item.querySelector('.escola-portaria-texto');
+      const caret = item.querySelector('.caret');
+      if (!texto) return;
+      const visivel = texto.style.display !== 'none';
+      texto.style.display = visivel ? 'none' : 'block';
+      if (caret) caret.style.transform = visivel ? '' : 'rotate(90deg)';
+    }
+
+    async function verificarProgresso() {
+      await carregarHistorico();
+      await atualizarProgressoIA();
+      showToast('Lista atualizada do banco', 'success');
+    }
+
+    async function atualizarProgressoIA() {
+      try {
+        // Usa edge function (que tem service role) para contornar RLS
+        const r = await fetch(`${SUPABASE_FN}/progresso-ia`);
+        if (!r.ok) {
+          console.warn('progresso-ia falhou:', r.status);
+          return;
+        }
+        const dados = await r.json();
+        const total = dados.total || 0;
+        const pendentes = dados.pendentes || 0;
+        const novosCampos = dados.novos_campos || 0;
+        const completas = dados.completas || 0;
+        const ultima = dados.ultima_analise ? [{ analisado_em: dados.ultima_analise }] : [];
+
+        // Atualiza barra de progresso (% analisadas com esquema completo)
+        const pct = total > 0 ? Math.round(completas * 100 / total) : 0;
+        document.getElementById('progresso-barra').style.width = pct + '%';
+        document.getElementById('progresso-pct').textContent = pct + '%';
+
+        const totalRestante = pendentes + novosCampos;
+        if (totalRestante === 0) {
+          document.getElementById('progresso-texto').textContent = `✓ Todas as ${total} portarias completas!`;
+          document.getElementById('progresso-pct').style.color = 'green';
+        } else {
+          document.getElementById('progresso-texto').textContent = `${completas} de ${total} completas · ${pendentes} pendentes · ${novosCampos} com campos faltando`;
+          document.getElementById('progresso-pct').style.color = '';
+        }
+
+        if (ultima && ultima[0] && ultima[0].analisado_em) {
+          const dt = new Date(ultima[0].analisado_em);
+          const h = dt.getHours().toString().padStart(2,'0');
+          const m = dt.getMinutes().toString().padStart(2,'0');
+          document.getElementById('progresso-ultima').textContent = `última análise: ${h}:${m}`;
+        } else {
+          document.getElementById('progresso-ultima').textContent = '';
+        }
+
+        // Atualiza contadores nos botões
+        const cPend = document.getElementById('contador-pendentes');
+        const cNovos = document.getElementById('contador-novos-campos');
+        if (cPend) cPend.textContent = pendentes > 0 ? `(${pendentes})` : '';
+        if (cNovos) cNovos.textContent = novosCampos > 0 ? `(${novosCampos})` : '';
+
+        // Desabilita botões quando contagem é zero
+        const btnPend = document.getElementById('btn-atualizar-pendentes');
+        const btnNovos = document.getElementById('btn-atualizar-novos');
+        if (btnPend) { btnPend.disabled = pendentes === 0; btnPend.style.opacity = pendentes === 0 ? '0.4' : '1'; }
+        if (btnNovos) { btnNovos.disabled = novosCampos === 0; btnNovos.style.opacity = novosCampos === 0 ? '0.4' : '1'; }
+      } catch(e) {
+        console.warn('Progresso IA:', e);
+      }
+    }
+
+    // === BUSCA DE NOMES COM IA ===
+    let buscaIAAtiva = false;
+
+    async function atualizarPendentes() { return _disparaAnalise('pendentes', 'btn-atualizar-pendentes', 'Atualizar pendentes'); }
+    async function atualizarNovosCampos() { return _disparaAnalise('novos-campos', 'btn-atualizar-novos', 'Atualizar novos campos'); }
+
+    async function _disparaAnalise(modo, btnId, btnLabelOriginal) {
+      const btnIniciar = document.getElementById(btnId);
+      const progresso = document.getElementById('ia-progresso');
+      const status = document.getElementById('ia-status');
+      const contador = document.getElementById('ia-contador');
+      const barra = document.getElementById('ia-barra');
+      const log = document.getElementById('ia-log');
+
+      btnIniciar.disabled = true;
+      btnIniciar.textContent = 'Disparado!';
+      progresso.style.display = 'block';
+      log.innerHTML = '';
+      status.textContent = 'Processando lote no servidor...';
+      contador.textContent = 'aguarde...';
+
+      try {
+        // Chama analisar-lote: processa 20 portarias no servidor de uma vez
+        const resp = await fetch(`${SUPABASE_FN}/analisar-lote`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ modo }),
+        });
+        const data = await resp.json();
+
+        if (!resp.ok) {
+          const erro = data.erro || 'Erro desconhecido';
+          showToast('Erro: ' + erro, 'error');
+          log.innerHTML = `<div style="color:var(--accent);">✗ ${escapeHtml(erro)}</div>`;
+          return;
+        }
+
+        if (data.mensagem && data.processadas === 0) {
+          status.textContent = 'Nenhuma portaria pendente! ✓';
+          barra.style.width = '100%';
+          showToast('Todas as portarias já estão atualizadas!', 'success');
+        } else {
+          status.textContent = `${data.processadas} analisadas neste lote`;
+          contador.textContent = data.continua_em_background ? 'continua processando em background...' : 'concluído';
+          barra.style.width = data.continua_em_background ? '50%' : '100%';
+          ;(data.resultados || []).forEach((r) => {
+            if (r.erro) {
+              log.innerHTML += `<div style="color:var(--accent);">✗ ${escapeHtml(r.numero||'?')}: ${escapeHtml(r.erro)}</div>`;
+            } else {
+              log.innerHTML += `<div style="color:var(--ink);">✓ ${escapeHtml(r.numero||'?')}: ${escapeHtml(r.escola||'(sem escola identificada)')}</div>`;
+            }
+          });
+          if (data.continua_em_background) {
+            showToast(`${data.processadas} analisadas. Continua processando o restante automaticamente.`, 'success');
+          } else {
+            showToast(`${data.processadas} analisadas. Tudo completo!`, 'success');
+          }
+        }
+
+        // Recarregar do banco com dados atualizados
+        await carregarHistorico();
+
+      } catch (e) {
+        showToast('Erro: ' + e.message, 'error');
+      } finally {
+        btnIniciar.disabled = false;
+        btnIniciar.textContent = btnLabelOriginal;
+        // Recoloca os contadores nos botões (pq mexemos no textContent)
+        await atualizarProgressoIA();
+      }
+    }
+
+    async function atualizarTudoIA() {
+      const confirma = confirm(
+        'Isso vai APAGAR todos os campos preenchidos pela IA e analisar TODAS as 884 portarias do zero.\n\n' +
+        'Vai levar aproximadamente 1 hora rodando em segundo plano.\n\n' +
+        'Você pode fechar o browser, a análise continua no servidor.\n\n' +
+        'Tem certeza que deseja continuar?'
+      );
+      if (!confirma) return;
+
+      const btn = document.getElementById('btn-atualizar-tudo');
+      btn.disabled = true;
+      btn.textContent = 'Resetando...';
+
+      try {
+        const r = await fetch(`${SUPABASE_FN}/resetar-analise-ia`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: '{}',
+        });
+        const data = await r.json();
+
+        if (!r.ok) {
+          showToast('Erro: ' + (data.erro || 'desconhecido'), 'error');
+        } else {
+          showToast(`Todas as portarias resetadas (${data.total_resetadas}). Análise reiniciada em background.`, 'success');
+          await carregarHistorico();
+          await atualizarProgressoIA();
+        }
+      } catch (e) {
+        showToast('Erro: ' + e.message, 'error');
+      } finally {
+        btn.disabled = false;
+        btn.textContent = 'Atualizar tudo (refazer)';
+      }
+    }
+
+    // === BUSCA ===
+    async function executarBusca() {
+      const filtros = {
+        curso:     document.getElementById('busca-curso').value.trim(),
+        etapa:     document.getElementById('busca-etapa').value.trim(),
+        escola:    document.getElementById('busca-escola').value.trim(),
+        municipio: document.getElementById('busca-municipio').value.trim(),
+        situacao:  document.getElementById('busca-situacao').value,
+      };
+
+      const resumo = document.getElementById('busca-resumo');
+      const resultados = document.getElementById('busca-resultados');
+
+      resumo.style.display = 'block';
+      resumo.textContent = 'Buscando...';
+      resultados.innerHTML = '';
+
+      try {
+        const r = await fetch(`${SUPABASE_FN}/buscar`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(filtros),
+        });
+        const data = await r.json();
+
+        if (!r.ok) {
+          resumo.textContent = 'Erro: ' + (data.erro || 'desconhecido');
+          resumo.style.color = 'var(--accent)';
+          return;
+        }
+
+        const escolas = data.escolas || [];
+
+        if (escolas.length === 0) {
+          resumo.textContent = '✗ Nenhum resultado encontrado para os filtros aplicados';
+          resumo.style.color = 'var(--muted)';
+          return;
+        }
+
+        resumo.style.color = 'var(--ink)';
+        resumo.innerHTML = `<strong>${escolas.length}</strong> escola${escolas.length>1?'s':''} encontrada${escolas.length>1?'s':''} · <strong>${data.total_cursos}</strong> curso${data.total_cursos!==1?'s':''} · <strong>${data.total_etapas}</strong> etapa${data.total_etapas!==1?'s':''}`;
+
+        resultados.innerHTML = escolas.map(e => renderEscolaResultado(e)).join('');
+
+      } catch (e) {
+        resumo.textContent = 'Erro: ' + e.message;
+        resumo.style.color = 'var(--accent)';
+      }
+    }
+
+    function limparBusca() {
+      document.getElementById('busca-curso').value = '';
+      document.getElementById('busca-etapa').value = '';
+      document.getElementById('busca-escola').value = '';
+      document.getElementById('busca-municipio').value = '';
+      document.getElementById('busca-situacao').value = 'todas';
+      document.getElementById('busca-resumo').style.display = 'none';
+      document.getElementById('busca-resultados').innerHTML = '';
+    }
+
+    function corSituacao(situacao) {
+      if (situacao === 'ativo') return '#1f7a3f';
+      if (situacao === 'vencido') return 'var(--accent)';
+      if (situacao === 'cessado') return 'var(--muted)';
+      return 'var(--ink)';
+    }
+
+    function rotuloSituacao(s, dias) {
+      if (s === 'ativo') {
+        if (dias != null && dias <= 90) return `Ativo · vence em ${dias} dia${dias!==1?'s':''}`;
+        return 'Ativo';
+      }
+      if (s === 'vencido') return 'Vencido';
+      if (s === 'cessado') return 'Cessado';
+      if (s === 'sem_vencimento') return 'Sem vencimento';
+      return s;
+    }
+
+    function renderEscolaResultado(e) {
+      const linhasCursos = (e.cursos || []).map(c => `
+        <tr style="border-bottom: 1px solid var(--rule);">
+          <td style="padding: 8px 12px; font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);"><strong>${escapeHtml(c.nome)}</strong>${c.qualificacoes ? `<div style="font-size: 11px; color: var(--muted); margin-top: 2px;">${escapeHtml(c.qualificacoes)}</div>` : ''}</td>
+          <td style="padding: 8px 12px; font-family: 'Inter', sans-serif; font-size: 12px; color: var(--muted); white-space: nowrap;">${escapeHtml(c.ato_descricao || '—')}</td>
+          <td style="padding: 8px 12px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--muted); white-space: nowrap;">${c.data_vencimento ? formatarData(c.data_vencimento) : '—'}</td>
+          <td style="padding: 8px 12px; font-family: 'Inter', sans-serif; font-size: 12px; color: ${corSituacao(c.situacao)}; font-weight: 600; white-space: nowrap;">${rotuloSituacao(c.situacao, c.dias_para_vencer)}</td>
+          <td style="padding: 8px 12px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); white-space: nowrap;">${c.portaria_numero || '—'}</td>
+        </tr>
+      `).join('');
+
+      const linhasEtapas = (e.etapas || []).map(et => `
+        <tr style="border-bottom: 1px solid var(--rule);">
+          <td style="padding: 8px 12px; font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink);"><strong>${escapeHtml(et.etapa)}</strong></td>
+          <td style="padding: 8px 12px; font-family: 'Inter', sans-serif; font-size: 12px; color: var(--muted); white-space: nowrap;">${escapeHtml(et.ato_descricao || '—')}</td>
+          <td style="padding: 8px 12px; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--muted); white-space: nowrap;">${et.data_vencimento ? formatarData(et.data_vencimento) : '—'}</td>
+          <td style="padding: 8px 12px; font-family: 'Inter', sans-serif; font-size: 12px; color: ${corSituacao(et.situacao)}; font-weight: 600; white-space: nowrap;">${rotuloSituacao(et.situacao, et.dias_para_vencer)}</td>
+          <td style="padding: 8px 12px; font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); white-space: nowrap;">${et.portaria_numero || '—'}</td>
+        </tr>
+      `).join('');
+
+      return `
+        <div style="margin-bottom: 24px; padding: 18px 22px; background: var(--paper); border: 1px solid var(--rule);">
+          <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 14px;">
+            <div>
+              <h3 style="font-family: 'Fraunces', serif; font-size: 19px; color: var(--ink); margin: 0 0 4px 0;">${escapeHtml(e.nome)}</h3>
+              <div style="font-family: 'Inter', sans-serif; font-size: 12px; color: var(--muted);">
+                ${e.municipio ? `${escapeHtml(e.municipio)}` : ''}${e.municipio && e.sre ? ' · ' : ''}${e.sre ? `SRE ${escapeHtml(e.sre)}` : ''}
+              </div>
+            </div>
+            <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); text-align: right;">
+              ${(e.cursos||[]).length} curso${(e.cursos||[]).length!==1?'s':''} · ${(e.etapas||[]).length} etapa${(e.etapas||[]).length!==1?'s':''}
+            </div>
+          </div>
+
+          ${linhasCursos ? `
+            <div style="margin-top: 12px;">
+              <div style="font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px;">Cursos</div>
+              <table style="width: 100%; border-collapse: collapse;">
+                <thead>
+                  <tr style="background: var(--cream);">
+                    <th style="text-align: left; padding: 6px 12px; font-family: 'Inter', sans-serif; font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Nome</th>
+                    <th style="text-align: left; padding: 6px 12px; font-family: 'Inter', sans-serif; font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Ato</th>
+                    <th style="text-align: left; padding: 6px 12px; font-family: 'Inter', sans-serif; font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Vencimento</th>
+                    <th style="text-align: left; padding: 6px 12px; font-family: 'Inter', sans-serif; font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Situação</th>
+                    <th style="text-align: left; padding: 6px 12px; font-family: 'Inter', sans-serif; font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Portaria</th>
+                  </tr>
+                </thead>
+                <tbody>${linhasCursos}</tbody>
+              </table>
+            </div>
+          ` : ''}
+
+          ${linhasEtapas ? `
+            <div style="margin-top: 16px;">
+              <div style="font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 6px;">Etapas de Ensino</div>
+              <table style="width: 100%; border-collapse: collapse;">
+                <thead>
+                  <tr style="background: var(--cream);">
+                    <th style="text-align: left; padding: 6px 12px; font-family: 'Inter', sans-serif; font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Etapa</th>
+                    <th style="text-align: left; padding: 6px 12px; font-family: 'Inter', sans-serif; font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Ato</th>
+                    <th style="text-align: left; padding: 6px 12px; font-family: 'Inter', sans-serif; font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Vencimento</th>
+                    <th style="text-align: left; padding: 6px 12px; font-family: 'Inter', sans-serif; font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Situação</th>
+                    <th style="text-align: left; padding: 6px 12px; font-family: 'Inter', sans-serif; font-size: 11px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em;">Portaria</th>
+                  </tr>
+                </thead>
+                <tbody>${linhasEtapas}</tbody>
+              </table>
+            </div>
+          ` : ''}
+        </div>
+      `;
+    }
+
+    // === FORMATO NOVO (detecção de mudanças) ===
+    async function fnAnalisar(file) {
+      const status = document.getElementById('fn-status');
+      const resultado = document.getElementById('fn-resultado');
+      const arquivoLabel = document.getElementById('fn-arquivo');
+      arquivoLabel.textContent = file.name;
+      resultado.innerHTML = '';
+      status.style.display = 'block';
+      status.style.color = 'var(--ink)';
+      status.textContent = '⏳ Etapa 1/2: Extraindo seção de Inspeção Escolar do PDF...';
+
+      try {
+        // Etapa 1: extrair seção via Vercel
+        const fd = new FormData();
+        fd.append('file', file);
+        const r1 = await fetch('/api/extrair_secao', { method: 'POST', body: fd });
+        const d1 = await r1.json();
+
+        if (!r1.ok || !d1.ok) {
+          status.style.color = 'var(--accent)';
+          status.textContent = '✗ Erro ao extrair PDF: ' + (d1.erro || d1.mensagem || 'desconhecido');
+          return;
+        }
+
+        if (!d1.secao_encontrada) {
+          status.style.color = 'var(--accent)';
+          status.textContent = '⚠ Seção de Inspeção Escolar NÃO foi localizada neste PDF. ' + (d1.mensagem || '');
+          return;
+        }
+
+        status.textContent = `✓ Seção encontrada (${d1.tamanho_secao_chars} chars, ${d1.qtd_portarias_extraidas_pelo_codigo_atual} portarias detectadas pelo código atual). Etapa 2/2: enviando para análise da IA...`;
+
+        // Etapa 2: análise pela IA
+        const r2 = await fetch(`${SUPABASE_FN}/detectar-formato`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ trecho: d1.trecho }),
+        });
+        const d2 = await r2.json();
+
+        if (!r2.ok || !d2.ok) {
+          status.style.color = 'var(--accent)';
+          status.textContent = '✗ Erro na análise da IA: ' + (d2.erro || 'desconhecido');
+          return;
+        }
+
+        status.style.color = 'var(--ink)';
+        status.textContent = `✓ Análise concluída · ${d2.caracteres_analisados} chars analisados${d2.caracteres_truncados > 0 ? ` (${d2.caracteres_truncados} chars truncados)` : ''}`;
+
+        renderRelatorioFormato(d1, d2.analise);
+
+      } catch (e) {
+        status.style.color = 'var(--accent)';
+        status.textContent = '✗ Erro: ' + e.message;
+      }
+    }
+
+    function renderRelatorioFormato(extracao, analise) {
+      const cor = {
+        usar_normalmente: '#1f7a3f',
+        ajuste_pequeno: '#a06a00',
+        ajuste_grande: 'var(--accent)',
+      }[analise.recomendacao] || 'var(--ink)';
+
+      const rotulo = {
+        usar_normalmente: '✓ Pode usar normalmente',
+        ajuste_pequeno: '⚠ Ajuste pequeno necessário',
+        ajuste_grande: '⚠ Ajuste grande necessário',
+      }[analise.recomendacao] || analise.recomendacao;
+
+      const renderLista = (items, cor, prefix) => {
+        if (!items || items.length === 0) return '';
+        return `<ul style="font-family:'Inter',sans-serif;font-size:13px;color:${cor};padding-left:18px;margin:6px 0;line-height:1.7;">${items.map(i => `<li>${prefix}${escapeHtml(typeof i === 'string' ? i : JSON.stringify(i))}</li>`).join('')}</ul>`;
+      };
+
+      const exemplosHtml = (analise.exemplos_portarias || []).map(ex => `
+        <div style="padding: 10px 14px; background: var(--cream); border: 1px solid var(--rule); margin-bottom: 8px;">
+          <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); margin-bottom: 4px;">Portaria ${escapeHtml(ex.numero || '?')}</div>
+          <div style="font-family: 'Inter', sans-serif; font-size: 12px; color: var(--ink);"><strong>Início:</strong> ${escapeHtml(ex.primeiras_palavras || '—')}</div>
+          <div style="font-family: 'Inter', sans-serif; font-size: 12px; color: var(--ink); margin-top: 2px;"><strong>Terminador:</strong> ${escapeHtml(ex.terminador || '—')}</div>
+        </div>
+      `).join('');
+
+      const resultado = document.getElementById('fn-resultado');
+      resultado.innerHTML = `
+        <div style="padding: 20px 24px; background: var(--paper); border: 1px solid var(--rule); margin-bottom: 16px;">
+          <div style="display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 14px; flex-wrap: wrap;">
+            <div>
+              <h3 style="font-family: 'Fraunces', serif; font-size: 22px; color: ${cor}; margin: 0 0 4px 0;">${rotulo}</h3>
+              <div style="font-family: 'Inter', sans-serif; font-size: 12px; color: var(--muted);">
+                Confiança da análise: <strong style="color: var(--ink);">${analise.confianca || '—'}</strong> · ${analise.portarias_detectadas || 0} portarias identificadas
+              </div>
+            </div>
+            <button onclick="fnCopiarRelatorio()" style="background: none; border: 1px solid var(--rule); padding: 8px 16px; font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer; color: var(--ink); white-space: nowrap;">📋 Copiar relatório</button>
+          </div>
+
+          ${analise.observacoes ? `
+            <div style="padding: 12px 14px; background: var(--cream); border-left: 3px solid ${cor}; margin-bottom: 14px;">
+              <strong style="font-family: 'Inter', sans-serif; font-size: 12px; color: var(--ink);">Resumo da IA:</strong>
+              <div style="font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink); font-style: italic; margin-top: 4px;">${escapeHtml(analise.observacoes)}</div>
+            </div>
+          ` : ''}
+
+          ${analise.padroes_OK && analise.padroes_OK.length > 0 ? `
+            <div style="margin-top: 12px;">
+              <div style="font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: #1f7a3f; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px;">✓ Padrões compatíveis</div>
+              ${renderLista(analise.padroes_OK, '#1f7a3f', '')}
+            </div>
+          ` : ''}
+
+          ${analise.padroes_NOVOS && analise.padroes_NOVOS.length > 0 ? `
+            <div style="margin-top: 12px;">
+              <div style="font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: 'var(--accent)'; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px;">⚠ Padrões NOVOS (não esperados)</div>
+              ${renderLista(analise.padroes_NOVOS, 'var(--accent)', '')}
+            </div>
+          ` : ''}
+
+          ${analise.padroes_FALTANDO && analise.padroes_FALTANDO.length > 0 ? `
+            <div style="margin-top: 12px;">
+              <div style="font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: #a06a00; text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 4px;">⚠ Padrões esperados FALTANDO</div>
+              ${renderLista(analise.padroes_FALTANDO, '#a06a00', '')}
+            </div>
+          ` : ''}
+
+          ${exemplosHtml ? `
+            <div style="margin-top: 16px;">
+              <div style="font-family: 'Inter', sans-serif; font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; margin-bottom: 8px;">Amostra de portarias detectadas</div>
+              ${exemplosHtml}
+            </div>
+          ` : ''}
+
+          <div style="margin-top: 16px; padding-top: 12px; border-top: 1px solid var(--rule); font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--muted);">
+            Arquivo: ${escapeHtml(extracao.arquivo)} · Data do diário: ${extracao.data_diario || '—'} · Página inicial: ${extracao.pagina_inicio || '—'} · Código atual extraiu: ${extracao.qtd_portarias_extraidas_pelo_codigo_atual} portarias
+          </div>
+        </div>
+
+        <details style="margin-top: 12px;">
+          <summary style="cursor: pointer; font-family: 'Inter', sans-serif; font-size: 12px; color: var(--muted); padding: 8px 0;">Ver trecho extraído (primeiros 15.000 chars)</summary>
+          <pre id="fn-trecho-bruto" style="margin-top: 8px; padding: 14px; background: var(--cream); border: 1px solid var(--rule); font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--ink); white-space: pre-wrap; max-height: 400px; overflow: auto; line-height: 1.5;">${escapeHtml(extracao.trecho || '')}</pre>
+        </details>
+      `;
+
+      // Guarda o relatório em variável global pra função "Copiar"
+      window._fnRelatorio = {
+        arquivo: extracao.arquivo,
+        data_diario: extracao.data_diario,
+        portarias_pelo_codigo: extracao.qtd_portarias_extraidas_pelo_codigo_atual,
+        analise,
+      };
+    }
+
+    function fnCopiarRelatorio() {
+      if (!window._fnRelatorio) return;
+      const r = window._fnRelatorio;
+      const txt = `RELATORIO DE FORMATO NOVO
+Arquivo: ${r.arquivo}
+Data do diário: ${r.data_diario || '—'}
+Portarias detectadas pelo código atual: ${r.portarias_pelo_codigo}
+
+ANÁLISE DA IA:
+Recomendação: ${r.analise.recomendacao}
+Confiança: ${r.analise.confianca}
+Portarias detectadas pela IA: ${r.analise.portarias_detectadas}
+
+Observações: ${r.analise.observacoes || '—'}
+
+Padrões OK: ${(r.analise.padroes_OK || []).join(' | ') || '—'}
+
+Padrões NOVOS: ${(r.analise.padroes_NOVOS || []).join(' | ') || '—'}
+
+Padrões FALTANDO: ${(r.analise.padroes_FALTANDO || []).join(' | ') || '—'}
+
+Exemplos:
+${(r.analise.exemplos_portarias || []).map(ex => `- ${ex.numero}: "${ex.primeiras_palavras}" → "${ex.terminador}"`).join('\n') || '—'}
+`;
+      navigator.clipboard.writeText(txt).then(() => {
+        showToast('Relatório copiado para a área de transferência', 'success');
+      }).catch(() => {
+        showToast('Erro ao copiar', 'error');
+      });
+    }
+
+    // Listener pro input de upload
+    document.addEventListener('DOMContentLoaded', () => {
+      const fnInput = document.getElementById('fn-input');
+      if (fnInput) {
+        fnInput.addEventListener('change', (ev) => {
+          const file = ev.target.files[0];
+          if (file) fnAnalisar(file);
+        });
+      }
+      // Como Painel é a aba ativa inicial, carregar dados dela já
+      window._painelCarregado = true;
+      if (typeof painelBuscar === 'function') {
+        setTimeout(painelBuscar, 100);
+      }
+    });
+
+    // ========================================================================
+    // PAINEL DE ACOMPANHAMENTO (tela principal de trabalho)
+    // ========================================================================
+
+    // Configuração visual de cada status (ícone, rótulo, cor)
+    const PAINEL_STATUS_CFG = {
+      urgente_3_meses:      { icon: '⚡', label: 'URGENTE (3 meses)',     cor: '#C04F00', cor_bg: '#FBE9DC' },
+      vencido_mais_1_ano:   { icon: '✗', label: 'Vencido +1 ano',         cor: '#5A1A1A', cor_bg: '#F0DEDE' },
+      vencido_mais_6_meses: { icon: '✗', label: 'Vencido +6 meses',       cor: '#7B2D2D', cor_bg: '#F4E1E1' },
+      vencido_recente:      { icon: '✗', label: 'Vencido (recente)',      cor: '#A04141', cor_bg: '#F8E7E7' },
+      alerta_6_meses:       { icon: '⚠', label: 'Alerta (6 meses)',       cor: '#A06A00', cor_bg: '#FBF1DC' },
+      atencao_10_meses:     { icon: '⚠', label: 'Atenção (10 meses)',     cor: '#8C7026', cor_bg: '#F6EDD6' },
+      ativo:                { icon: '✓', label: 'Ativo',                  cor: '#1F7A3F', cor_bg: '#DEF1E5' },
+      cessado:              { icon: '○', label: 'Cessado',                cor: '#6E6E6E', cor_bg: '#ECECEC' },
+      sem_vencimento:       { icon: '–', label: 'Sem vencimento',         cor: '#8B8B8B', cor_bg: '#F0F0F0' },
+    };
+
+    // Ordem de exibição dos cards (urgente → ativo → cessado)
+    const PAINEL_STATUS_ORDEM = [
+      'urgente_3_meses', 'vencido_mais_1_ano', 'vencido_mais_6_meses', 'vencido_recente',
+      'alerta_6_meses', 'atencao_10_meses', 'ativo', 'sem_vencimento', 'cessado',
+    ];
+
+    let _painelDebounce = null;
+    let _painelPagina = 1;
+    function painelBuscarDebounced() {
+      clearTimeout(_painelDebounce);
+      _painelDebounce = setTimeout(() => { _painelPagina = 1; painelBuscar(); }, 400);
+    }
+
+    function painelIrParaPagina(p) { _painelPagina = p; painelBuscar(); }
+
+    function painelLimparFiltros() {
+      document.getElementById('pn-status').value = 'todos';
+      document.getElementById('pn-tipo').value = 'ambos';
+      document.getElementById('pn-escola').value = '';
+      document.getElementById('pn-municipio').value = '';
+      document.getElementById('pn-sre').value = '';
+      document.getElementById('pn-curso').value = '';
+      document.getElementById('pn-etapa').value = '';
+      // Reset pílulas: ativa só "Todos"
+      ['dependencia', 'nivel'].forEach(grupo => {
+        const c = document.getElementById(`pn-${grupo}-pills`);
+        if (!c) return;
+        c.querySelectorAll('.pn-pill').forEach(p => {
+          if (p.classList.contains('pn-pill-todos')) painelAtivarPill(p);
+          else painelDesativarPill(p);
+        });
+      });
+      _painelPagina = 1;
+      painelBuscar();
+    }
+
+    async function painelBuscar() {
+      const status    = document.getElementById('pn-status').value;
+      const tipo      = document.getElementById('pn-tipo').value;
+      const escola    = document.getElementById('pn-escola').value;
+      const municipio = document.getElementById('pn-municipio').value;
+      const sre       = document.getElementById('pn-sre').value;
+      const curso     = document.getElementById('pn-curso').value;
+      const etapa     = document.getElementById('pn-etapa').value;
+      const dependencia = painelObterValoresPills('dependencia');
+      const nivel       = painelObterValoresPills('nivel');
+
+      const statusMsg = document.getElementById('pn-status-msg');
+      statusMsg.textContent = 'Carregando dados...';
+      statusMsg.style.color = 'var(--muted)';
+
+      try {
+        const resp = await fetch(`${SUPABASE_FN}/painel-escolas`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ status, tipo, escola, municipio, sre, curso, etapa, dependencia, nivel, pagina: _painelPagina, por_pagina: 50 }),
+        });
+        const dados = await resp.json();
+        if (!resp.ok) throw new Error(dados.erro || 'Erro ao buscar');
+
+        renderPainelCards(dados.contadores || {}, status);
+        renderPainelLista(dados.escolas || [], dados.total_cursos, dados.total_etapas, dados.total_escolas, dados.total_paginas, dados.pagina);
+
+        const resumo = document.getElementById('pn-resumo');
+        resumo.textContent = `${dados.total_escolas} escolas${dados.total_paginas > 1 ? ' · Página ' + dados.pagina + ' de ' + dados.total_paginas : ''}`;
+        statusMsg.textContent = '';
+      } catch (e) {
+        statusMsg.style.color = 'var(--accent)';
+        statusMsg.textContent = '✗ Erro: ' + e.message;
+      }
+    }
+
+    // Lê os valores ativos das pílulas (exclui "Todos")
+    function painelObterValoresPills(grupo) {
+      const container = document.getElementById(`pn-${grupo}-pills`);
+      if (!container) return [];
+      const ativos = container.querySelectorAll('.pn-pill-ativo:not(.pn-pill-todos)');
+      return Array.from(ativos).map(p => p.dataset.valor).filter(Boolean);
+    }
+
+    // Toggle de pílula multi-seleção
+    function painelTogglePill(grupo, btn) {
+      const container = document.getElementById(`pn-${grupo}-pills`);
+      const valor = btn.dataset.valor;
+      const isTodos = valor === '';
+
+      if (isTodos) {
+        // Clicou em "Todos" → desativa tudo e ativa só "Todos"
+        container.querySelectorAll('.pn-pill').forEach(p => painelDesativarPill(p));
+        painelAtivarPill(btn);
+      } else {
+        // Toggle do valor especifico
+        if (btn.classList.contains('pn-pill-ativo')) {
+          painelDesativarPill(btn);
+        } else {
+          painelAtivarPill(btn);
+        }
+        // Se nenhum especifico estiver ativo, ativa "Todos"; senao desativa "Todos"
+        const especificosAtivos = container.querySelectorAll('.pn-pill-ativo:not(.pn-pill-todos)').length;
+        const todosBtn = container.querySelector('.pn-pill-todos');
+        if (especificosAtivos === 0) {
+          painelAtivarPill(todosBtn);
+        } else {
+          painelDesativarPill(todosBtn);
+        }
+      }
+      painelBuscar();
+    }
+
+    function painelAtivarPill(p) {
+      p.classList.add('pn-pill-ativo');
+      p.style.background = 'var(--ink)';
+      p.style.color = 'var(--paper)';
+      p.style.borderColor = 'var(--ink)';
+    }
+
+    function painelDesativarPill(p) {
+      p.classList.remove('pn-pill-ativo');
+      p.style.background = 'var(--paper)';
+      p.style.color = 'var(--ink)';
+      p.style.borderColor = 'var(--rule)';
+    }
+
+    function renderPainelCards(contadores, statusSelecionado) {
+      const cards = document.getElementById('painel-cards');
+      const total = Object.values(contadores).reduce((a, b) => a + (b || 0), 0);
+
+      const cardTotal = `
+        <div onclick="painelFiltrarPorStatus('todos')" style="padding: 16px 18px; background: var(--ink); color: var(--paper); border: 1px solid var(--ink); cursor: pointer; transition: opacity 0.15s; ${statusSelecionado === 'todos' ? 'box-shadow: 0 0 0 3px var(--gold);' : ''}">
+          <div style="font-family: 'Inter', sans-serif; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; opacity: 0.8;">Total</div>
+          <div style="font-family: 'Fraunces', serif; font-size: 32px; line-height: 1.1; margin-top: 4px;">${total}</div>
+        </div>
+      `;
+
+      const outrosCards = PAINEL_STATUS_ORDEM
+        .filter(k => contadores[k] > 0 || statusSelecionado === k)
+        .map(k => {
+          const cfg = PAINEL_STATUS_CFG[k];
+          const qtd = contadores[k] || 0;
+          const ativo = statusSelecionado === k;
+          return `
+            <div onclick="painelFiltrarPorStatus('${k}')" style="padding: 16px 18px; background: ${cfg.cor_bg}; border: 1px solid ${cfg.cor}; cursor: pointer; transition: opacity 0.15s; ${ativo ? 'box-shadow: 0 0 0 3px var(--gold);' : ''}">
+              <div style="font-family: 'Inter', sans-serif; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: ${cfg.cor}; font-weight: 600;">${cfg.icon} ${cfg.label}</div>
+              <div style="font-family: 'Fraunces', serif; font-size: 32px; line-height: 1.1; margin-top: 4px; color: ${cfg.cor};">${qtd}</div>
+            </div>
+          `;
+        }).join('');
+
+      cards.innerHTML = cardTotal + outrosCards;
+    }
+
+    function painelFiltrarPorStatus(status) {
+      document.getElementById('pn-status').value = status;
+      painelBuscar();
+    }
+
+    function renderPainelLista(escolas, totalCursos, totalEtapas, totalEscolas, totalPaginas, paginaAtual) {
+      const lista = document.getElementById('pn-lista');
+      if (!escolas || escolas.length === 0) {
+        lista.innerHTML = `<div style="text-align: center; padding: 60px 20px; color: var(--muted); font-family: 'Inter', sans-serif; font-size: 14px;">Nenhuma escola encontrada com os filtros aplicados.</div>`;
+        return;
+      }
+
+      const listaHtml = escolas.map((e, idx) => {
+        const cursosHtml = (e.cursos || []).map(c => renderItemPainel(c, 'curso', e.id)).join('');
+        const etapasHtml = (e.etapas || []).map(et => renderItemPainel(et, 'etapa', e.id)).join('');
+
+        const corDep = {
+          ESTADUAL:  '#1F4E79',
+          MUNICIPAL: '#2E7D32',
+          FEDERAL:   '#6A1B9A',
+          PRIVADA:   '#5A5A5A',
+        }[e.dependencia] || 'var(--muted)';
+
+        return `
+          <div style="background: var(--paper); border: 1px solid var(--rule);">
+            <div onclick="painelToggleEscola(${idx})" style="padding: 14px 18px; cursor: pointer; display: flex; justify-content: space-between; align-items: center; gap: 12px; border-bottom: 1px solid var(--rule);">
+              <div style="flex: 1; min-width: 0;">
+                <div style="font-family: 'Fraunces', serif; font-size: 17px; color: var(--ink); line-height: 1.3;">${escapeHtml(e.nome || '—')}</div>
+                <div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted); margin-top: 2px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
+                  ${e.dependencia ? `<span style="display: inline-block; padding: 1px 7px; border: 1px solid ${corDep}; color: ${corDep}; font-weight: 600; font-size: 9px; letter-spacing: 0.05em;">${escapeHtml(e.dependencia)}</span>` : ''}
+                  <span>${e.municipio ? escapeHtml(e.municipio) : '—'}${e.sre ? ' · ' + escapeHtml(e.sre) : ''}</span>
+                </div>
+              </div>
+              <div style="display: flex; align-items: center; gap: 12px; flex-shrink: 0;">
+                <span style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted);">${(e.cursos || []).length} cursos · ${(e.etapas || []).length} etapas</span>
+                <span id="pn-toggle-${idx}" style="font-family: 'JetBrains Mono', monospace; font-size: 14px; color: var(--ink); width: 14px; text-align: center;">▾</span>
+              </div>
+            </div>
+            <div id="pn-detalhe-${idx}" style="display: block; padding: 8px 14px 12px;">
+              ${cursosHtml}
+              ${etapasHtml}
+              ${(!cursosHtml && !etapasHtml) ? `<div style="font-family:'Inter',sans-serif;font-size:12px;color:var(--muted);padding:8px 0;">Sem cursos ou etapas registrados.</div>` : ''}
+            </div>
+          </div>
+        `;
+      }).join('');
+
+      // Paginação
+      let paginacaoHtml = '';
+      if (totalPaginas > 1) {
+        const btnStyle = (ativo) => `padding: 6px 14px; border: 1px solid var(--rule); background: ${ativo ? 'var(--ink)' : 'var(--paper)'}; color: ${ativo ? 'var(--paper)' : 'var(--ink)'}; font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;`;
+        const inicio = Math.max(1, paginaAtual - 2);
+        const fim = Math.min(totalPaginas, paginaAtual + 2);
+        let botoes = '';
+        if (paginaAtual > 1) botoes += `<button onclick="painelIrParaPagina(${paginaAtual - 1})" style="${btnStyle(false)}">‹ Anterior</button>`;
+        if (inicio > 1) botoes += `<button onclick="painelIrParaPagina(1)" style="${btnStyle(false)}">1</button>${inicio > 2 ? '<span style="padding:6px 4px;font-size:12px;color:var(--muted);">…</span>' : ''}`;
+        for (let p = inicio; p <= fim; p++) {
+          botoes += `<button onclick="painelIrParaPagina(${p})" style="${btnStyle(p === paginaAtual)}">${p}</button>`;
+        }
+        if (fim < totalPaginas) botoes += `${fim < totalPaginas - 1 ? '<span style="padding:6px 4px;font-size:12px;color:var(--muted);">…</span>' : ''}<button onclick="painelIrParaPagina(${totalPaginas})" style="${btnStyle(false)}">${totalPaginas}</button>`;
+        if (paginaAtual < totalPaginas) botoes += `<button onclick="painelIrParaPagina(${paginaAtual + 1})" style="${btnStyle(false)}">Próxima ›</button>`;
+        paginacaoHtml = `<div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:center;align-items:center;padding:20px 0;">${botoes}</div>`;
+      }
+
+      lista.innerHTML = listaHtml + paginacaoHtml;
+    }
+
+    function calcularSituacaoLocal(dataVencimento) {
+      if (!dataVencimento) return { situacao: 'sem_vencimento', dias: null };
+      // Aceita tanto YYYY-MM-DD quanto só o ano
+      let dataStr = dataVencimento;
+      if (/^\d{4}$/.test(dataStr)) dataStr = dataStr + '-12-31';
+      const venc = new Date(dataStr);
+      if (isNaN(venc)) return { situacao: 'sem_vencimento', dias: null };
+      const hoje = new Date(); hoje.setHours(0,0,0,0);
+      const dias = Math.round((venc - hoje) / 86400000);
+      if (dias < -365) return { situacao: 'vencido_mais_1_ano', dias };
+      if (dias < -180) return { situacao: 'vencido_mais_6_meses', dias };
+      if (dias < 0)    return { situacao: 'vencido_recente', dias };
+      if (dias <= 90)  return { situacao: 'urgente_3_meses', dias };
+      if (dias <= 180) return { situacao: 'alerta_6_meses', dias };
+      if (dias <= 300) return { situacao: 'atencao_10_meses', dias };
+      return { situacao: 'ativo', dias };
+    }
+
+    function renderItemPainel(item, tipo, escolaId) {
+      const { situacao, dias } = calcularSituacaoLocal(item.data_vencimento);
+      const cfg = PAINEL_STATUS_CFG[situacao] || PAINEL_STATUS_CFG.sem_vencimento;
+      const titulo = tipo === 'curso' ? (item.nome || '—') : (item.etapa || '—');
+      const tipoLabel = tipo === 'curso' ? 'Curso' : 'Etapa';
+
+      const formatarData = (d) => {
+        if (!d) return '—';
+        if (/^\d{4}$/.test(d)) return d;
+        const partes = d.split('-');
+        return partes.length === 3 ? `${partes[2]}/${partes[1]}/${partes[0]}` : d;
+      };
+
+      let infoVencimento = '';
+      if (dias != null) {
+        if (dias < 0) infoVencimento = `vencido há ${Math.abs(dias)} dias`;
+        else if (dias === 0) infoVencimento = 'vence hoje';
+        else if (dias < 30) infoVencimento = `vence em ${dias} dias`;
+        else if (dias < 365) infoVencimento = `vence em ${Math.round(dias / 30)} meses`;
+        else infoVencimento = `vence em ${(dias / 365).toFixed(1)} anos`;
+      }
+
+      return `
+        <div style="display: flex; align-items: center; gap: 10px; padding: 8px 6px; border-bottom: 1px dashed var(--rule);">
+          <span style="display: inline-block; width: 5px; align-self: stretch; background: ${cfg.cor};"></span>
+          <div style="flex: 1; min-width: 0;">
+            <div style="display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;">
+              <span style="font-family: 'Inter', sans-serif; font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600;">${tipoLabel}</span>
+              <span style="font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink); font-weight: 500;">${escapeHtml(titulo)}</span>
+              ${item.qualificacoes ? `<span style="font-family: 'Inter', sans-serif; font-size: 11px; color: var(--muted); font-style: italic;">— ${escapeHtml(item.qualificacoes)}</span>` : ''}
+            </div>
+            <div style="font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--muted); margin-top: 2px;">
+              ${item.ato_descricao ? escapeHtml(item.ato_descricao) + ' · ' : ''}Início: ${formatarData(item.data_inicio_vigencia)} · Vencimento: ${formatarData(item.data_vencimento)}${item.portaria_id ? ' · Port. #' + item.portaria_id : ''}
+            </div>
+          </div>
+          <div style="text-align: right; flex-shrink: 0;">
+            <div style="display: inline-block; padding: 3px 10px; background: ${cfg.cor_bg}; border: 1px solid ${cfg.cor}; color: ${cfg.cor}; font-family: 'Inter', sans-serif; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap;">${cfg.icon} ${cfg.label}</div>
+            ${infoVencimento ? `<div style="font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--muted); margin-top: 3px;">${infoVencimento}</div>` : ''}
+          </div>
+        </div>
+      `;
+    }
+
+    async function painelToggleHistorico(itemId, escolaId, tipo, chave) {
+      const div = document.getElementById('hist-' + itemId);
+      if (!div) return;
+      // Se já está aberto, fecha
+      if (div.style.display === 'block') {
+        div.style.display = 'none';
+        return;
+      }
+      // Se ainda não carregou, busca
+      if (!div.dataset.carregado) {
+        div.style.display = 'block';
+        div.innerHTML = `<div style="font-family: 'JetBrains Mono', monospace; font-size: 11px; color: var(--muted);">Carregando histórico...</div>`;
+        try {
+          const r = await fetch(`${SUPABASE_FN}/painel-escolas`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ acao: 'historico', escola_id: escolaId, tipo_item: tipo, chave }),
+          });
+          const d = await r.json();
+          if (!r.ok || d.erro) throw new Error(d.erro || 'Erro');
+          div.innerHTML = renderHistorico(d.historico || [], tipo);
+          div.dataset.carregado = '1';
+        } catch (e) {
+          div.innerHTML = `<div style="color: var(--accent); font-family: 'Inter', sans-serif; font-size: 11px;">Erro: ${escapeHtml(e.message)}</div>`;
+        }
+      } else {
+        div.style.display = 'block';
+      }
+    }
+
+    function renderHistorico(itens, tipo) {
+      if (!itens || itens.length === 0) {
+        return `<div style="font-family: 'Inter', sans-serif; font-size: 11px; color: var(--muted);">Sem histórico adicional.</div>`;
+      }
+      const formatarData = (d) => {
+        if (!d) return '—';
+        const partes = d.split('-');
+        return partes.length === 3 ? `${partes[2]}/${partes[1]}/${partes[0]}` : d;
+      };
+      const titulo = tipo === 'curso' ? 'Histórico do curso' : 'Histórico da etapa';
+      const linhas = itens.map(it => {
+        const cfg = PAINEL_STATUS_CFG[it.situacao] || PAINEL_STATUS_CFG.sem_vencimento;
+        const vigente = it.is_vigente
+          ? `<span style="display: inline-block; padding: 1px 6px; background: var(--gold); color: var(--ink); font-family: 'Inter', sans-serif; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; margin-right: 6px;">VIGENTE</span>`
+          : `<span style="display: inline-block; padding: 1px 6px; background: var(--paper); color: var(--muted); font-family: 'Inter', sans-serif; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; margin-right: 6px; border: 1px solid var(--rule);">SUPERADO</span>`;
+        return `
+          <div style="padding: 6px 0; border-bottom: 1px dotted var(--rule); font-family: 'Inter', sans-serif; font-size: 11px; color: var(--ink);">
+            ${vigente}
+            <strong>${escapeHtml(it.ato_descricao || '—')}</strong> · 
+            Port. ${escapeHtml(it.portaria_numero || '?')} · 
+            Diário ${formatarData(it.data_diario)} · 
+            Vigência: ${formatarData(it.data_inicio_vigencia)} → ${formatarData(it.data_vencimento)}
+            <span style="display: inline-block; padding: 1px 6px; background: ${cfg.cor_bg}; color: ${cfg.cor}; font-size: 9px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; margin-left: 6px;">${cfg.icon} ${cfg.label}</span>
+          </div>
+        `;
+      }).join('');
+      return `
+        <div style="font-family: 'Inter', sans-serif; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600; margin-bottom: 6px;">${titulo} (${itens.length} atos)</div>
+        ${linhas}
+      `;
+    }
+
+    function painelToggleEscola(idx) {
+      const det = document.getElementById('pn-detalhe-' + idx);
+      const tog = document.getElementById('pn-toggle-' + idx);
+      if (!det || !tog) return;
+      if (det.style.display === 'none') {
+        det.style.display = 'block';
+        tog.textContent = '▾';
+      } else {
+        det.style.display = 'none';
+        tog.textContent = '▸';
+      }
+    }
+
+    function pararBuscaIA() { /* não necessário com job server-side */ }
+
+    (async () => {
+      await initSupabase();
+      await carregarHistorico();
+      await atualizarProgressoIA();
+      // Enter dispara busca em qualquer input da busca
+      ['busca-curso', 'busca-etapa', 'busca-escola', 'busca-municipio'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('keypress', (ev) => { if (ev.key === 'Enter') executarBusca(); });
+      });
+      // Atualiza progresso automaticamente a cada 30s enquanto a aba Escolas estiver aberta
+      setInterval(async () => {
+        const abaEscolas = document.getElementById('view-escolas');
+        if (abaEscolas && abaEscolas.style.display !== 'none') {
+          await atualizarProgressoIA();
+        }
+      }, 30000);
+    })();
+  </script>
+</body>
+</html>
