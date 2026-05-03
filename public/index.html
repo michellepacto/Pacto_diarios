@@ -847,6 +847,25 @@
       <h2 class="view-title">Painel de Acompanhamento</h2>
       <p class="view-subtitle">Status de vigência de cursos e etapas por escola</p>
 
+      <!-- Indicador progresso IA -->
+      <div id="painel-ia-indicador" style="margin-top: 20px; padding: 14px 18px; background: var(--paper); border: 1px solid var(--rule); display: flex; flex-wrap: wrap; gap: 24px; align-items: center;">
+        <div style="display: flex; align-items: center; gap: 12px; flex: 1; min-width: 240px;">
+          <span id="pn-ia-dot" style="display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: var(--muted); flex-shrink: 0;"></span>
+          <div style="flex: 1; min-width: 0;">
+            <div style="font-family: 'Inter', sans-serif; font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600;">Análise por IA</div>
+            <div id="pn-ia-status-texto" style="font-family: 'Fraunces', serif; font-size: 16px; color: var(--ink); margin-top: 2px;">Carregando...</div>
+          </div>
+        </div>
+        <div style="display: flex; gap: 18px; flex-wrap: wrap; font-family: 'JetBrains Mono', monospace; font-size: 11px;">
+          <div><span style="color: var(--muted);">Verificadas:</span> <strong id="pn-ia-verificadas" style="color: var(--green);">—</strong></div>
+          <div><span style="color: var(--muted);">Faltam:</span> <strong id="pn-ia-faltam" style="color: var(--accent);">—</strong></div>
+          <div><span style="color: var(--muted);">Total:</span> <strong id="pn-ia-total" style="color: var(--ink);">—</strong></div>
+        </div>
+        <div style="flex-basis: 100%; height: 6px; background: var(--paper-dark); position: relative; overflow: hidden;">
+          <div id="pn-ia-barra" style="height: 100%; background: var(--green); width: 0%; transition: width 0.5s ease;"></div>
+        </div>
+      </div>
+
       <!-- Cards de resumo por status -->
       <div id="painel-cards" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 10px; margin-top: 24px; margin-bottom: 24px;">
         <div style="padding: 30px; text-align: center; font-family: 'JetBrains Mono', monospace; font-size: 12px; color: var(--muted); grid-column: 1 / -1;">Carregando...</div>
@@ -1682,6 +1701,10 @@
       if (nome === 'painel' && !window._painelCarregado) {
         window._painelCarregado = true;
         painelBuscar();
+        painelIniciarMonitorIA();
+      } else if (nome === 'painel') {
+        // Re-iniciar monitor se voltou pra aba
+        painelIniciarMonitorIA();
       }
     }
 
@@ -2358,6 +2381,7 @@ ${(r.analise.exemplos_portarias || []).map(ex => `- ${ex.numero}: "${ex.primeira
       window._painelCarregado = true;
       if (typeof painelBuscar === 'function') {
         setTimeout(painelBuscar, 100);
+        setTimeout(painelIniciarMonitorIA, 200);
       }
     });
 
@@ -2386,6 +2410,59 @@ ${(r.analise.exemplos_portarias || []).map(ex => `- ${ex.numero}: "${ex.primeira
 
     let _painelDebounce = null;
     let _painelPagina = 1;
+    let _painelIAInterval = null;
+
+    async function painelAtualizarIndicadorIA() {
+      try {
+        const r = await fetch(`${SUPABASE_FN}/progresso-ia`);
+        if (!r.ok) return;
+        const d = await r.json();
+        const total = d.total || 0;
+        const pendentes = d.pendentes || 0;
+        const contaminadas = d.contaminadas || 0;
+        const verificadas = total - pendentes - contaminadas;
+        const pct = total > 0 ? (verificadas / (total - contaminadas) * 100) : 0;
+
+        const elDot = document.getElementById('pn-ia-dot');
+        const elTexto = document.getElementById('pn-ia-status-texto');
+        const elVerif = document.getElementById('pn-ia-verificadas');
+        const elFaltam = document.getElementById('pn-ia-faltam');
+        const elTotal = document.getElementById('pn-ia-total');
+        const elBarra = document.getElementById('pn-ia-barra');
+
+        if (!elDot) return;
+
+        elVerif.textContent = verificadas.toLocaleString('pt-BR');
+        elFaltam.textContent = pendentes.toLocaleString('pt-BR');
+        elTotal.textContent = total.toLocaleString('pt-BR');
+        elBarra.style.width = pct.toFixed(1) + '%';
+
+        if (pendentes === 0) {
+          elDot.style.background = 'var(--green)';
+          elTexto.textContent = `✓ Concluído (${pct.toFixed(0)}% das portarias)`;
+          // Para de atualizar quando termina
+          if (_painelIAInterval) { clearInterval(_painelIAInterval); _painelIAInterval = null; }
+        } else {
+          // Verifica se houve análise recente (indica IA rodando)
+          const ultima = d.ultima_analise ? new Date(d.ultima_analise) : null;
+          const minDesde = ultima ? Math.floor((Date.now() - ultima.getTime()) / 60000) : 999;
+          if (minDesde < 3) {
+            elDot.style.background = 'var(--green)';
+            elTexto.textContent = `Processando... ${pct.toFixed(0)}% concluído`;
+          } else {
+            elDot.style.background = 'var(--amber)';
+            elTexto.textContent = `Aguardando próximo lote · ${pct.toFixed(0)}% concluído`;
+          }
+        }
+      } catch (e) { /* silencioso */ }
+    }
+
+    function painelIniciarMonitorIA() {
+      painelAtualizarIndicadorIA();
+      if (_painelIAInterval) clearInterval(_painelIAInterval);
+      _painelIAInterval = setInterval(painelAtualizarIndicadorIA, 30000); // 30s
+    }
+
     function painelBuscarDebounced() {
       clearTimeout(_painelDebounce);
       _painelDebounce = setTimeout(() => { _painelPagina = 1; painelBuscar(); }, 400);
