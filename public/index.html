@@ -2385,10 +2385,13 @@ ${(r.analise.exemplos_portarias || []).map(ex => `- ${ex.numero}: "${ex.primeira
     ];
 
     let _painelDebounce = null;
+    let _painelPagina = 1;
     function painelBuscarDebounced() {
       clearTimeout(_painelDebounce);
-      _painelDebounce = setTimeout(painelBuscar, 400);
+      _painelDebounce = setTimeout(() => { _painelPagina = 1; painelBuscar(); }, 400);
     }
+
+    function painelIrParaPagina(p) { _painelPagina = p; painelBuscar(); }
 
     function painelLimparFiltros() {
       document.getElementById('pn-status').value = 'todos';
@@ -2407,6 +2410,7 @@ ${(r.analise.exemplos_portarias || []).map(ex => `- ${ex.numero}: "${ex.primeira
           else painelDesativarPill(p);
         });
       });
+      _painelPagina = 1;
       painelBuscar();
     }
 
@@ -2429,16 +2433,16 @@ ${(r.analise.exemplos_portarias || []).map(ex => `- ${ex.numero}: "${ex.primeira
         const resp = await fetch(`${SUPABASE_FN}/painel-escolas`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ status, tipo, escola, municipio, sre, curso, etapa, dependencia, nivel }),
+          body: JSON.stringify({ status, tipo, escola, municipio, sre, curso, etapa, dependencia, nivel, pagina: _painelPagina, por_pagina: 50 }),
         });
         const dados = await resp.json();
         if (!resp.ok) throw new Error(dados.erro || 'Erro ao buscar');
 
         renderPainelCards(dados.contadores || {}, status);
-        renderPainelLista(dados.escolas || [], dados.total_cursos, dados.total_etapas);
+        renderPainelLista(dados.escolas || [], dados.total_cursos, dados.total_etapas, dados.total_escolas, dados.total_paginas, dados.pagina);
 
         const resumo = document.getElementById('pn-resumo');
-        resumo.textContent = `${dados.total_escolas} escolas · ${dados.total_cursos} cursos · ${dados.total_etapas} etapas`;
+        resumo.textContent = `${dados.total_escolas} escolas${dados.total_paginas > 1 ? ' · Página ' + dados.pagina + ' de ' + dados.total_paginas : ''}`;
         statusMsg.textContent = '';
       } catch (e) {
         statusMsg.style.color = 'var(--accent)';
@@ -2530,19 +2534,17 @@ ${(r.analise.exemplos_portarias || []).map(ex => `- ${ex.numero}: "${ex.primeira
       painelBuscar();
     }
 
-    function renderPainelLista(escolas, totalCursos, totalEtapas) {
+    function renderPainelLista(escolas, totalCursos, totalEtapas, totalEscolas, totalPaginas, paginaAtual) {
       const lista = document.getElementById('pn-lista');
       if (!escolas || escolas.length === 0) {
         lista.innerHTML = `<div style="text-align: center; padding: 60px 20px; color: var(--muted); font-family: 'Inter', sans-serif; font-size: 14px;">Nenhuma escola encontrada com os filtros aplicados.</div>`;
         return;
       }
 
-      lista.innerHTML = escolas.map((e, idx) => {
-        const totalItens = (e.cursos || []).length + (e.etapas || []).length;
+      const listaHtml = escolas.map((e, idx) => {
         const cursosHtml = (e.cursos || []).map(c => renderItemPainel(c, 'curso', e.id)).join('');
         const etapasHtml = (e.etapas || []).map(et => renderItemPainel(et, 'etapa', e.id)).join('');
 
-        // Cores discretas por dependência
         const corDep = {
           ESTADUAL:  '#1F4E79',
           MUNICIPAL: '#2E7D32',
@@ -2568,26 +2570,65 @@ ${(r.analise.exemplos_portarias || []).map(ex => `- ${ex.numero}: "${ex.primeira
             <div id="pn-detalhe-${idx}" style="display: block; padding: 8px 14px 12px;">
               ${cursosHtml}
               ${etapasHtml}
+              ${(!cursosHtml && !etapasHtml) ? `<div style="font-family:'Inter',sans-serif;font-size:12px;color:var(--muted);padding:8px 0;">Sem cursos ou etapas registrados.</div>` : ''}
             </div>
           </div>
         `;
       }).join('');
+
+      // Paginação
+      let paginacaoHtml = '';
+      if (totalPaginas > 1) {
+        const btnStyle = (ativo) => `padding: 6px 14px; border: 1px solid var(--rule); background: ${ativo ? 'var(--ink)' : 'var(--paper)'}; color: ${ativo ? 'var(--paper)' : 'var(--ink)'}; font-family: 'Inter', sans-serif; font-size: 12px; cursor: pointer;`;
+        const inicio = Math.max(1, paginaAtual - 2);
+        const fim = Math.min(totalPaginas, paginaAtual + 2);
+        let botoes = '';
+        if (paginaAtual > 1) botoes += `<button onclick="painelIrParaPagina(${paginaAtual - 1})" style="${btnStyle(false)}">‹ Anterior</button>`;
+        if (inicio > 1) botoes += `<button onclick="painelIrParaPagina(1)" style="${btnStyle(false)}">1</button>${inicio > 2 ? '<span style="padding:6px 4px;font-size:12px;color:var(--muted);">…</span>' : ''}`;
+        for (let p = inicio; p <= fim; p++) {
+          botoes += `<button onclick="painelIrParaPagina(${p})" style="${btnStyle(p === paginaAtual)}">${p}</button>`;
+        }
+        if (fim < totalPaginas) botoes += `${fim < totalPaginas - 1 ? '<span style="padding:6px 4px;font-size:12px;color:var(--muted);">…</span>' : ''}<button onclick="painelIrParaPagina(${totalPaginas})" style="${btnStyle(false)}">${totalPaginas}</button>`;
+        if (paginaAtual < totalPaginas) botoes += `<button onclick="painelIrParaPagina(${paginaAtual + 1})" style="${btnStyle(false)}">Próxima ›</button>`;
+        paginacaoHtml = `<div style="display:flex;gap:4px;flex-wrap:wrap;justify-content:center;align-items:center;padding:20px 0;">${botoes}</div>`;
+      }
+
+      lista.innerHTML = listaHtml + paginacaoHtml;
+    }
+
+    function calcularSituacaoLocal(dataVencimento) {
+      if (!dataVencimento) return { situacao: 'sem_vencimento', dias: null };
+      // Aceita tanto YYYY-MM-DD quanto só o ano
+      let dataStr = dataVencimento;
+      if (/^\d{4}$/.test(dataStr)) dataStr = dataStr + '-12-31';
+      const venc = new Date(dataStr);
+      if (isNaN(venc)) return { situacao: 'sem_vencimento', dias: null };
+      const hoje = new Date(); hoje.setHours(0,0,0,0);
+      const dias = Math.round((venc - hoje) / 86400000);
+      if (dias < -365) return { situacao: 'vencido_mais_1_ano', dias };
+      if (dias < -180) return { situacao: 'vencido_mais_6_meses', dias };
+      if (dias < 0)    return { situacao: 'vencido_recente', dias };
+      if (dias <= 90)  return { situacao: 'urgente_3_meses', dias };
+      if (dias <= 180) return { situacao: 'alerta_6_meses', dias };
+      if (dias <= 300) return { situacao: 'atencao_10_meses', dias };
+      return { situacao: 'ativo', dias };
     }
 
     function renderItemPainel(item, tipo, escolaId) {
-      const cfg = PAINEL_STATUS_CFG[item.situacao] || PAINEL_STATUS_CFG.sem_vencimento;
+      const { situacao, dias } = calcularSituacaoLocal(item.data_vencimento);
+      const cfg = PAINEL_STATUS_CFG[situacao] || PAINEL_STATUS_CFG.sem_vencimento;
       const titulo = tipo === 'curso' ? (item.nome || '—') : (item.etapa || '—');
       const tipoLabel = tipo === 'curso' ? 'Curso' : 'Etapa';
 
       const formatarData = (d) => {
         if (!d) return '—';
+        if (/^\d{4}$/.test(d)) return d;
         const partes = d.split('-');
         return partes.length === 3 ? `${partes[2]}/${partes[1]}/${partes[0]}` : d;
       };
 
       let infoVencimento = '';
-      if (item.dias_para_vencer != null) {
-        const dias = item.dias_para_vencer;
+      if (dias != null) {
         if (dias < 0) infoVencimento = `vencido há ${Math.abs(dias)} dias`;
         else if (dias === 0) infoVencimento = 'vence hoje';
         else if (dias < 30) infoVencimento = `vence em ${dias} dias`;
@@ -2595,27 +2636,18 @@ ${(r.analise.exemplos_portarias || []).map(ex => `- ${ex.numero}: "${ex.primeira
         else infoVencimento = `vence em ${(dias / 365).toFixed(1)} anos`;
       }
 
-      // Histórico: aparece só quando há mais de 1 ato pra essa escola+curso/etapa
-      const temHistorico = item.qtd_historico && item.qtd_historico > 1;
-      const itemId = `${tipo}-${item.id}`;
-      const chave = tipo === 'curso' ? (item.curso_chave || '') : (item.etapa_chave || '');
-      const chaveJson = JSON.stringify(chave).replace(/"/g, '&quot;');
-
       return `
         <div style="display: flex; align-items: center; gap: 10px; padding: 8px 6px; border-bottom: 1px dashed var(--rule);">
           <span style="display: inline-block; width: 5px; align-self: stretch; background: ${cfg.cor};"></span>
           <div style="flex: 1; min-width: 0;">
             <div style="display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap;">
               <span style="font-family: 'Inter', sans-serif; font-size: 9px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); font-weight: 600;">${tipoLabel}</span>
-              ${item.categoria_nivel ? `<span style="font-family: 'Inter', sans-serif; font-size: 9px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--ink); padding: 1px 6px; background: var(--cream); border: 1px solid var(--rule);">${escapeHtml(item.categoria_nivel)}</span>` : ''}
               <span style="font-family: 'Inter', sans-serif; font-size: 13px; color: var(--ink); font-weight: 500;">${escapeHtml(titulo)}</span>
               ${item.qualificacoes ? `<span style="font-family: 'Inter', sans-serif; font-size: 11px; color: var(--muted); font-style: italic;">— ${escapeHtml(item.qualificacoes)}</span>` : ''}
             </div>
-            <div style="font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--muted); margin-top: 2px; display: flex; flex-wrap: wrap; gap: 8px; align-items: center;">
-              <span>${item.ato_descricao ? escapeHtml(item.ato_descricao) + ' · ' : ''}Início: ${formatarData(item.data_inicio_vigencia)} · Vencimento: ${formatarData(item.data_vencimento)}${item.portaria_numero ? ' · Port. ' + escapeHtml(item.portaria_numero) : ''}</span>
-              ${temHistorico ? `<button onclick="painelToggleHistorico('${itemId}', '${escolaId}', '${tipo}', ${chaveJson})" style="background: var(--cream); border: 1px solid var(--rule); padding: 1px 8px; font-family: 'Inter', sans-serif; font-size: 10px; cursor: pointer; color: var(--ink); text-transform: uppercase; letter-spacing: 0.04em;">▸ Ver histórico (${item.qtd_historico})</button>` : ''}
+            <div style="font-family: 'JetBrains Mono', monospace; font-size: 10px; color: var(--muted); margin-top: 2px;">
+              ${item.ato_descricao ? escapeHtml(item.ato_descricao) + ' · ' : ''}Início: ${formatarData(item.data_inicio_vigencia)} · Vencimento: ${formatarData(item.data_vencimento)}${item.portaria_id ? ' · Port. #' + item.portaria_id : ''}
             </div>
-            <div id="hist-${itemId}" style="display: none; margin-top: 8px; padding: 8px 10px; background: var(--cream); border-left: 2px solid var(--gold);"></div>
           </div>
           <div style="text-align: right; flex-shrink: 0;">
             <div style="display: inline-block; padding: 3px 10px; background: ${cfg.cor_bg}; border: 1px solid ${cfg.cor}; color: ${cfg.cor}; font-family: 'Inter', sans-serif; font-size: 10px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; white-space: nowrap;">${cfg.icon} ${cfg.label}</div>
